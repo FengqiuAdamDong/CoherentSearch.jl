@@ -172,7 +172,8 @@ SALT_PROFILES = 3      # --keep-profiles, stored prepfold profiles
 # measured-sigma arms add ~54 s where they fire and are a run-3 question, not a
 # white one.
 # `all` is every group and is the default, so an ordinary run is unchanged.
-ARM_GROUPS = ("prepfold", "accel", "rseek", "rseekw", "coherent")
+# `rseekc` is configuration C (see RSEEK_C_SPLIT_BINS), added 2026-09-30.
+ARM_GROUPS = ("prepfold", "accel", "rseek", "rseekw", "rseekc", "coherent")
 
 
 def parse_arms(spec):
@@ -208,6 +209,23 @@ RSEEK_B = [dict(Pmin=1.0 / (COH_HIFREQ * COH_MAXDECIM), Pmax=0.010, bmin=20, bma
            dict(Pmin=0.010, Pmax=0.05, bmin=160, bmax=174),
            dict(Pmin=0.05, Pmax=0.25, bmin=480, bmax=520),
            dict(Pmin=0.25, Pmax=10.0, bmin=960, bmax=1040)]
+# Configuration C, Vincent Morello's suggestion (2026-09-28): config A's 20-120
+# bins only while the period is too short for more, then a NARROW range --
+# `bins_max` ~ 1.17 `bins_min`, the regime `ffa_search`'s docstring asks for --
+# from the first period that admits 120 bins (120 * dt, 7.2 ms at 60 us) to
+# 10 s.  A's 20..120 sawtooth drops its mean trial density to ~43 per Fourier
+# bin, and its width bank, built from `bins_min`, stops at w = 6; at
+# bins_min = 120 riptide's bank is our nine widths to 30% duty.  So C folds slow
+# pulsars at about our deepest rung, 120 bins, which makes it the like-for-like
+# FFA-fold vs Fourier-fold comparison A was meant to be.  Two invocations,
+# candidates concatenated and ONE threshold on the union, exactly as `rseek_B`.
+RSEEK_C_SPLIT_BINS = 120
+
+
+def rseek_c_config(dt):
+    split = RSEEK_C_SPLIT_BINS * dt
+    return [dict(Pmin=RSEEK_A["Pmin"], Pmax=split, bmin=20, bmax=120),
+            dict(Pmin=split, Pmax=RSEEK_A["Pmax"], bmin=120, bmax=140)]
 
 INF_TEMPLATE = """ Data file name without suffix          =  {stem}
  Telescope used                         =  GBT
@@ -1022,6 +1040,21 @@ def _search_all(rec, draws, null_draws, stem, args, tools, T, keep_prof=False):
                                          ncand=len(allc), ok=ok)
         rec["config"]["rseek_B"] = RSEEK_B
 
+    # --- rseek, configuration C: 20-120 bins below 120*dt, 120-140 above ----
+    if _want(args, "rseekc"):
+        cfgs = rseek_c_config(args.dt)
+        allc, tt, ok = [], 0.0, True
+        for cfg in cfgs:
+            t, out, _, rc = rseek(cfg)
+            tt += t
+            ok &= (rc == 0)
+            allc += parse_rseek(out) if rc == 0 else []
+        rec["timing"]["rseek_C"] = tt
+        hits, fa = score(allc, inj, T, tol, keep=args.hits_per_inj)
+        rec["results"]["rseek_C"] = dict(hits=hits, false=fa_summary(fa, args.fa_top),
+                                         ncand=len(allc), ok=ok)
+        rec["config"]["rseek_C"] = cfgs
+
     # --- coherent_search: the shipped defaults, plus the deeper arms --------
     # Three SEPARATE invocations, not one: each arm is a different `SearchParams`,
     # and -- more to the point -- each must carry its OWN false-alarm tail, so a
@@ -1091,7 +1124,11 @@ def trial_counts(args, path):
     if os.path.isfile(path):
         try:
             with open(path) as fh:
-                return json.load(fh)
+                cached = json.load(fh)
+            # A cache written before an arm existed (run 2's predates rseek_C)
+            # is recomputed rather than silently leaving that arm uncounted.
+            if "rseek_C" in cached or "rseek_note" in cached:
+                return cached
         except Exception:
             pass
     out = {}
@@ -1113,7 +1150,8 @@ def trial_counts(args, path):
         ts = TimeSeries.from_numpy_array(
             _np.random.default_rng(0).normal(size=nprobe).astype(_np.float32),
             tsamp=args.dt)
-        for name, cfgs in (("rseek_A", [RSEEK_A]), ("rseek_B", RSEEK_B)):
+        for name, cfgs in (("rseek_A", [RSEEK_A]), ("rseek_B", RSEEK_B),
+                           ("rseek_C", rseek_c_config(args.dt))):
             tot = 0
             for c in cfgs:
                 _, pg = ffa_search(ts, period_min=c["Pmin"], period_max=c["Pmax"],
@@ -1481,7 +1519,7 @@ def main(argv=None):
                 # empty list on realisation 0 is a broken parser, not a quiet
                 # sky, and is worth stopping for.
                 if n == 0:
-                    dead = [m for m in ("rseek_A", "rseek_B", "rseek_W",
+                    dead = [m for m in ("rseek_A", "rseek_B", "rseek_W", "rseek_C",
                                         "accelsearch", "accelsearch_red",
                                         "coherent", "coherent_tier",
                                         "coherent_deep")
