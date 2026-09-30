@@ -50,6 +50,20 @@ rsync eiger:'/data1/mc/run2/mcpatch_accel+coherent+rseek+rseekw_*' /data1/mc/run
 # job does not "finish": stop it when the time is up.  Each worker walks its own
 # stride in sorted order, so a partial run is an unbiased subset of run 2.
 
+# run 5 (2026-09-30), answering Vincent Morello's review: two patch passes.
+#   fitzroy: `screen -dmS run5 bash mc/launch_run5.sh white` -- rseek_C
+#     (20..120 bins below 120*dt = 7.2 ms, 120..140 above) on EXACTLY run 4's
+#     22,368 white realisations (--only-indices-in), 19 workers, ~100 s a
+#     realisation under load, so it FINISHES on its own in ~36 h.
+#   eiger: `screen -dmS run5 bash mc/launch_run5.sh red` -- rseek_A, rseek_W
+#     and rseek_B (1 in 10) on run 3's red indices, --hits-per-inj 8, 15 workers,
+#     ~78 s a realisation => ~16k a day.  All 84,871 would take ~5 days; the plan
+#     is to STOP IT after ~2 days (~33k), which is an unbiased subset.
+# Then copy the patches to the analysis host's MATCHING directories (eiger's
+# /data1/mc/run3 is the live one; fitzroy's is a snapshot) and re-run go3.sh:
+rsync eiger:'/data1/mc/run3/mcpatch_rseek+rseekw_*' /data1/mc/run3/
+# Patch records carry no `config`; C's is `rseek_c_config(dt)` at 7418f89.
+
 # the whole report (combining runs is `cat`; this globs *.jsonl)
 $PIXI/python mc/mc_analyze.py mcout/
 $PIXI/python mc/mc_analyze.py mcout/ --sections roc,pairs,decompose --fap 1e-3
