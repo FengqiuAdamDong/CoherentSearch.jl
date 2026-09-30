@@ -1331,6 +1331,12 @@ def main(argv=None):
                          "population arguments differ from the original run and the "
                          "noise does too, so the patch would be scored against the "
                          "wrong signals; it aborts rather than writing that")
+    ap.add_argument("--only-indices-in", nargs="+", default=None, metavar="PATH",
+                    help="restrict the realisations to the indices present in "
+                         "these .jsonl files (PATCH records count, unlike "
+                         "--indices-from).  How a later top-up lands on exactly "
+                         "an earlier one's subset: `rseek_C` on run 4's 22,368 "
+                         "white realisations, paired with its `rseek_W`")
     ap.add_argument("--tol-bins", type=float, default=3.0)
     ap.add_argument("--coh-threads", type=int, default=1)
     ap.add_argument("--workdir", default=None, help="scratch for the ~200 MB of transient files per realisation (default: /dev/shm if present)")
@@ -1459,6 +1465,20 @@ def main(argv=None):
     else:
         idxs = [args.start + i for i in range(args.nreal)
                 if (args.start + i) % args.nworkers == args.worker]
+    if args.only_indices_in:
+        keep = set()
+        for p in args.only_indices_in:
+            for f in (glob.glob(os.path.join(p, "*.jsonl")) if os.path.isdir(p)
+                      else glob.glob(p)):
+                with open(f) as fh:
+                    for line in fh:
+                        try:
+                            keep.add(json.loads(line)["index"])
+                        except (ValueError, KeyError):
+                            pass
+        if not keep:
+            raise SystemExit(f"--only-indices-in: no indices in {args.only_indices_in}")
+        idxs = [i for i in idxs if i in keep]
     idxs = [i for i in idxs if i not in done]
     print(f"[worker {args.worker}] {len(idxs)} realisations -> {outfile}", flush=True)
 
