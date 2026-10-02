@@ -11,6 +11,11 @@
 #                     riptide measurement the paper and the email lacked, and a
 #                     measurement in place of the red displaced-hit bound.
 #                     Patches go INTO run 3's directory.
+#   redwc  (eiger)    rseek_WC -- configuration C on the PRESTO-whitened series
+#                     (2026-10-02) -- on EXACTLY the red realisations the `red`
+#                     pass finished, so it pairs with rseek_A/W/B there.  Start
+#                     it only after `red` has stopped: --only-indices-in reads
+#                     that pass's patch files once, at start-up.
 #
 # --outdir MUST be the directory being patched: mc_analyze keys records by
 # (directory, index), and a patch in its own directory is dropped silently.
@@ -47,6 +52,13 @@ red)
         --arms rseek,rseekw --indices-from $OUT --deep-every 10 \
         --rednoise-knee 0.1 50 \
         "${common[@]}" 2>&1 | tee -a $OUT/launch_run5.log ;;
+redwc)
+    OUT=/data1/mc/run3
+    $PIXI/python mc/mc_simulate.py --outdir $OUT --workers ${NWORK:-15} \
+        --arms rseekwc --indices-from $OUT \
+        --only-indices-in "$OUT/mcpatch_rseek+rseekw_eiger_*.jsonl" \
+        --rednoise-knee 0.1 50 \
+        "${common[@]}" 2>&1 | tee -a $OUT/launch_run5wc.log ;;
 *)
-    echo "usage: $0 white|red" >&2; exit 2 ;;
+    echo "usage: $0 white|red|redwc" >&2; exit 2 ;;
 esac
