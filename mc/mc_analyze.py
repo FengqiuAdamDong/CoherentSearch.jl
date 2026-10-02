@@ -163,6 +163,12 @@ def load(paths, with_profiles=False):
                             if d:
                                 d.pop("prof", None)
                 recs.append(r)
+    # Oldest first, so the NEWEST re-run of an arm wins.  File order is not time
+    # order: run 4's `mcpatch_accel+coherent+rseek+rseekw_eiger_*` sorts before
+    # the older `mcpatch_accel_fitzroy_*` repair ('+' < '_'), which then replaced
+    # run 4's accelsearch -- and its per-band tails -- on the 10,384 indices
+    # both cover (found 2026-10-02).
+    patches.sort(key=lambda pr: pr.get("t_start", 0.0))
     for pr in patches:
         base = seen.get((pr["run"], pr["index"]))
         if base is None:                       # patched a realisation we do not have

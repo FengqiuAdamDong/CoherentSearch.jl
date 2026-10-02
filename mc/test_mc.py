@@ -647,6 +647,32 @@ def test_patch_timing_host():
     check("both hosts count the realisation", n == {"eiger": 1, "fitzroy": 1}, str(n))
 
 
+def test_patch_order():
+    """The NEWEST patch of an arm wins, whatever the files are called.
+
+    Run 4's `mcpatch_accel+coherent+rseek+rseekw_eiger_*` sorts before the older
+    `mcpatch_accel_fitzroy_*` repair, which then overwrote run 4's accelsearch
+    (and its per-band tails) on every index both cover.
+    """
+    import json, tempfile
+    import mc_analyze as MA
+
+    with tempfile.TemporaryDirectory() as d:
+        base = dict(index=7, host="fitzroy", empty=False, injections=[],
+                    results={"accelsearch": {"ncand": 1}})
+        new = dict(index=7, host="eiger", patch=True, t_start=200.0,
+                   results={"accelsearch": {"ncand": 3}})
+        old = dict(index=7, host="fitzroy", patch=True, t_start=100.0,
+                   results={"accelsearch": {"ncand": 2}})
+        for name, r in (("mc_fitzroy_000", base), ("mcpatch_accel+x_eiger_000", new),
+                        ("mcpatch_accel_fitzroy_000", old)):
+            with open(os.path.join(d, name + ".jsonl"), "w") as fh:
+                fh.write(json.dumps(r) + "\n")
+        recs = MA.load([d])
+    got = recs[0]["results"]["accelsearch"]["ncand"]
+    check("the newest patch wins even when it sorts first", got == 3, str(got))
+
+
 def test_rednoise():
     """The red-noise generator: the spectrum it claims, and the pairing it promises."""
     import mc_simulate as MS
@@ -753,6 +779,7 @@ if __name__ == "__main__":
     test_missing_cut()
     test_run4_arms_and_hits()
     test_patch_timing_host()
+    test_patch_order()
     test_silent_failures()
     test_rednoise()
     print()
