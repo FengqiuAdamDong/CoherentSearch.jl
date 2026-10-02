@@ -616,6 +616,9 @@ def test_run4_arms_and_hits():
     check("rseek_C is registered everywhere the analysis looks",
           all("rseek_C" in t for t in (MA.METHODS, MA.SEARCHES, MA.RECORDED,
                                        MA.SNR1_LIKE)))
+    check("rseek_WC is registered everywhere the analysis looks",
+          all("rseek_WC" in t for t in (MA.METHODS, MA.SEARCHES, MA.RECORDED,
+                                        MA.SNR1_LIKE)))
 
 
 def test_patch_timing_host():

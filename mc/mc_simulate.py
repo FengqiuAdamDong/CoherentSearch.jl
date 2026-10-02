@@ -173,7 +173,8 @@ SALT_PROFILES = 3      # --keep-profiles, stored prepfold profiles
 # white one.
 # `all` is every group and is the default, so an ordinary run is unchanged.
 # `rseekc` is configuration C (see RSEEK_C_SPLIT_BINS), added 2026-09-30.
-ARM_GROUPS = ("prepfold", "accel", "rseek", "rseekw", "rseekc", "coherent")
+# `rseekwc` is C on the PRESTO-whitened series, as `rseekw` is A (2026-10-02).
+ARM_GROUPS = ("prepfold", "accel", "rseek", "rseekw", "rseekc", "rseekwc", "coherent")
 
 
 def parse_arms(spec):
@@ -1017,8 +1018,10 @@ def _search_all(rec, draws, null_draws, stem, args, tools, T, keep_prof=False):
     # running median is then switched off (see `rseek_nodered.py`), because
     # leaving it on would high-pass the data a second time and measure two
     # cleanings rather than one.  Its own false-alarm tail, like every other arm.
-    if _want(args, "rseekw"):
+    # The inverse transform is shared with `rseekwc` and charged to each arm.
+    if _want(args, "rseekw") or _want(args, "rseekwc"):
         t_inv, _, _, rc_inv = run([tools["realfft"], "-inv", base + "_red.fft"], cwd=wd)
+    if _want(args, "rseekw"):
         t, out, _, rc = rseek(RSEEK_A, inf=base + "_red.inf", tool="nodered")
         rec["timing"]["rseek_W"] = t + t_inv
         rw = parse_rseek(out) if (rc == 0 and rc_inv == 0) else []
@@ -1054,6 +1057,24 @@ def _search_all(rec, draws, null_draws, stem, args, tools, T, keep_prof=False):
         rec["results"]["rseek_C"] = dict(hits=hits, false=fa_summary(fa, args.fa_top),
                                          ncand=len(allc), ok=ok)
         rec["config"]["rseek_C"] = cfgs
+
+    # --- configuration C on the PRESTO-whitened series ----------------------
+    # `rseek_W` with C's bins: riptide's recommended regime on data cleaned the
+    # way we clean it, its own dereddening off.  This is the red-noise partner
+    # of `rseek_C` -- without it a C-led comparison falls back to A under red noise.
+    if _want(args, "rseekwc"):
+        cfgs = rseek_c_config(args.dt)
+        allc, tt, ok = [], t_inv, (rc_inv == 0)
+        for cfg in cfgs:
+            t, out, _, rc = rseek(cfg, inf=base + "_red.inf", tool="nodered")
+            tt += t
+            ok &= (rc == 0)
+            allc += parse_rseek(out) if rc == 0 else []
+        rec["timing"]["rseek_WC"] = tt
+        hits, fa = score(allc, inj, T, tol, keep=args.hits_per_inj)
+        rec["results"]["rseek_WC"] = dict(hits=hits, false=fa_summary(fa, args.fa_top),
+                                          ncand=len(allc), ok=ok)
+        rec["config"]["rseek_WC"] = cfgs
 
     # --- coherent_search: the shipped defaults, plus the deeper arms --------
     # Three SEPARATE invocations, not one: each arm is a different `SearchParams`,
@@ -1539,7 +1560,7 @@ def main(argv=None):
                 # empty list on realisation 0 is a broken parser, not a quiet
                 # sky, and is worth stopping for.
                 if n == 0:
-                    dead = [m for m in ("rseek_A", "rseek_B", "rseek_W", "rseek_C",
+                    dead = [m for m in ("rseek_A", "rseek_B", "rseek_W", "rseek_C", "rseek_WC",
                                         "accelsearch", "accelsearch_red",
                                         "coherent", "coherent_tier",
                                         "coherent_deep")

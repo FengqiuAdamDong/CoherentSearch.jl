@@ -75,12 +75,12 @@ import mc_model as MM
 # against the always-on `coherent` (analytic, _red.fft).  There is deliberately no
 # analytic-on-raw arm: that is a usage error, not a configuration.
 METHODS = ("prepfold_chi2", "prepfold_snr1", "accelsearch", "accelsearch_red",
-           "rseek_A", "rseek_B", "rseek_W", "rseek_C", "coherent", "coherent_tier",
+           "rseek_A", "rseek_B", "rseek_W", "rseek_C", "rseek_WC", "coherent", "coherent_tier",
            "coherent_deep", "coherent_meas", "coherent_rawmeas", "coh+tier")
-SEARCHES = ("accelsearch", "accelsearch_red", "rseek_A", "rseek_B", "rseek_W", "rseek_C",
+SEARCHES = ("accelsearch", "accelsearch_red", "rseek_A", "rseek_B", "rseek_W", "rseek_C", "rseek_WC",
             "coherent", "coherent_tier", "coherent_deep",
             "coherent_meas", "coherent_rawmeas", "coh+tier")
-RECORDED = ("accelsearch", "accelsearch_red", "rseek_A", "rseek_B", "rseek_W", "rseek_C",
+RECORDED = ("accelsearch", "accelsearch_red", "rseek_A", "rseek_B", "rseek_W", "rseek_C", "rseek_WC",
             "coherent", "coherent_tier", "coherent_deep",
             "coherent_meas", "coherent_rawmeas")
 # The union arm: a candidate list is the two arms' lists concatenated, which is
@@ -88,7 +88,7 @@ RECORDED = ("accelsearch", "accelsearch_red", "rseek_A", "rseek_B", "rseek_W", "
 UNION = {"coh+tier": ("coherent", "coherent_tier")}
 # Statistics that are the same quantity (riptide's snr1), so their VALUES may be
 # compared and not only their detection fractions.
-SNR1_LIKE = ("prepfold_snr1", "rseek_A", "rseek_B", "rseek_W", "rseek_C", "coherent",
+SNR1_LIKE = ("prepfold_snr1", "rseek_A", "rseek_B", "rseek_W", "rseek_C", "rseek_WC", "coherent",
              "coherent_tier", "coherent_deep", "coherent_meas",
              "coherent_rawmeas", "coh+tier")
 
