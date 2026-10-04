@@ -122,8 +122,9 @@ above `bins_min`. Our matched configuration A spans 20–120 bins, a factor of 6
 because one call cannot otherwise reach a 1.3 ms period. C, suggested by
 riptide's author, keeps 20–120 bins only for periods too short to fold deeper
 (below 7.2 ms) and folds 120–140 bins above that. So slow pulsars are folded at
-about our own deepest depth, and riptide's pulse-width trials reach the same
-30% duty cycle as ours. It is the like-for-like comparison of a time-domain fold
+about our own deepest depth, and riptide's pulse-width trials become the same
+nine widths as ours (up to 28 bins, i.e. 20–23% duty, where A has five reaching
+5% at its deepest folds). It is the like-for-like comparison of a time-domain fold
 with a Fourier-domain one. C beats A at every duty cycle (§1 item 2's table). Its
 two pieces are searched separately and their candidates pooled under one
 threshold, as for `rseek_B`.

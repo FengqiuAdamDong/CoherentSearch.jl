@@ -154,7 +154,7 @@ whole range in every downsampling cycle, and the width bank (built from
 `bins_min`) stops at `w = 6`, i.e. 6.5% duty at `b = 92`. C keeps A's 20–120
 only below `120 × dt` (7.2 ms at 60 µs), where nothing deeper fits, and folds
 **120–140** bins from there to 10 s. So slow pulsars are folded at about our
-deepest rung, with riptide's bank reaching 30% duty. Two invocations, candidates
+deepest rung, and riptide's bank becomes our own nine widths (1–28 bins, i.e. up to 20–23% duty at 120–140 bins, against A's five). Two invocations, candidates
 concatenated, one threshold on the union, exactly as `rseek_B`. On a 2^20 probe
 it evaluates 1.34x A's periods, all of the extra above 7.2 ms. **The paper leads
 with C** as riptide in its recommended regime; A stays as the coverage- and

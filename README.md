@@ -20,11 +20,14 @@ In short:
 - **More sensitive.** In an injection Monte Carlo over 76,105 white-noise
   realizations (plus 84,871 with red noise), with every code's threshold
   matched to the same measured false-alarm rate, we detect **76%** of
-  white-noise injections. riptide's
-  `rseek` detects 71% in its deepest configuration (which costs ~6x our
-  runtime) and 50% in the configuration matched to our frequency coverage;
-  PRESTO's `accelsearch` detects 42%. See `docs/comparison_points.md`, and read
-  its caveats before quoting any of this.
+  white-noise injections. riptide's `rseek` detects **64%** in the
+  narrow-fold-range configuration its authors recommend (~3x our runtime on the
+  same machine), 71% in its deepest configuration (~7x our runtime) and 50% in
+  the configuration matched to our frequency coverage and work (~1.7x); PRESTO's
+  `accelsearch` detects 42%. Against riptide's recommended configuration our
+  whole lead comes from a lower threshold at the same false-alarm rate, not from
+  recovering more signal. See `docs/comparison_points.md`, and read its caveats
+  before quoting any of this.
 - **A calculable false-alarm rate.** The input FFT is normalized, so the noise
   in every reconstructed profile is known in closed form rather than estimated,
   and the boxcar template is normalized so that each (phase, width) trial is
@@ -33,18 +36,23 @@ In short:
 - **Resilient to red noise.** Searching a whitened FFT keeps the matched
   threshold flat — 6.75 on white noise, 6.70–6.75 out to a 50 Hz red-noise knee.
   riptide detrends in the time domain instead, and over the same range its
-  matched threshold climbs from 7.6 to 250.
+  matched threshold climbs from 7.6 to 250. Given the same PRESTO-whitened data,
+  riptide's threshold is flat too, and it then loses sensitivity to red noise in
+  the same proportion we do.
 - **Fast.** Single-threaded it is **1.4–2.2x** as fast as `rseek` over matched
-  frequency coverage on three machines. It scales ~27x across 48 cores, and the
+  frequency coverage on three machines (one real observation), and in the
+  Monte Carlo, timed on one idle machine, `rseek` costs 1.7x our runtime per
+  simulated observation in the matched configuration and 3.1x in its
+  recommended one. It scales ~27x across 48 cores, and the
   whole search runs on a GPU: an L40 or an A100 is ~9x a 20-core Xeon, an RTX
   A4000 ~3.3x.
 - **Validated.** Every numerical result is cross-validated against
   the original Python [`coherent_search`](../coherent_search) package used as an
-  independent oracle (~1e-16 relative), the optimized search is pinned against
+  independent oracle (~1e-16 relative), the optimized search is verified against
   an unoptimized reference path inside this repo, and a change that should not
   move results is checked by `diff` on the candidate file.
 
-`bin/toy_coherent_search.jl` is the same algorithm with **every optimizaation
+`bin/toy_coherent_search.jl` is the same algorithm with **every optimization
 removed** — brute-force per-point interpolation, one inverse FFT per fold, the
 boxcar filter straight from its definition, plain nested loops. It is a complete,
 working search, roughly 150–250x slower than the production code, and it exists
@@ -132,7 +140,9 @@ Nearly every non-obvious choice below follows from one of them.
   a term from the statistic's variance.
 - **An analytic noise scale.** For a normalized input FFT the per-bin noise of
   the reconstructed profile follows from the FFT normalization alone —
-  `σ = sqrt(2·nlow + 0.5·nnyq)/nbins` — so it is computed, not measured. That is
+  `σ = sqrt(2·nlow + 0.5·nnyq)` for the unnormalized inverse FFT the search
+  uses (see [the noise scale](#the-noise-scale-analytic-by-default)) — so it is
+  computed, not measured. That is
   both faster and *more* accurate than the subsampled robust estimator it
   replaced (3.0% spread against 5.4%), and it removes a ~1% per-chunk noise term
   that used to land directly on every reported S/N.
@@ -198,9 +208,9 @@ Nearly every non-obvious choice below follows from one of them.
   numpy's `np.fft.irfft` (both ignore the imaginary parts of the DC/Nyquist
   bins); this is verified directly in the tests.
 - **Two paths that must agree.** A deliberately unoptimized *reference* path
-  (`block_metrics` / `reference_profiles`) is pinned to the Python oracle at
-  ~1e-16, and the whole optimized machinery is pinned to that reference at
-  8.4e-16. Every optimization has to keep both green.
+  (`block_metrics` / `reference_profiles`) is verified against the Python
+  oracle at ~1e-16, and the whole optimized machinery against that reference at
+  8.4e-16. Every optimization has to keep both comparisons passing.
 
 ## Installation and first use
 
@@ -271,9 +281,11 @@ julia --project=. -t auto bin/coherent_search.jl *_red.fft \
     --threshold 8
 ```
 
-Julia compiles the search on first use, which costs ~10 s of wall-clock before
-any work happens — comparable to the search itself on a short observation. One
-invocation pays it once for the whole batch, and the harmonic plans, FFTW plans
+Each invocation pays a fixed start-up cost before any work happens — about
+1–1.4 s on the machines we have measured (Julia's boot, loading the cached
+native code, FFTW planning; see [Start-up time](#start-up-time)), which is
+comparable to the search itself on a short observation. One invocation pays it
+once for the whole batch, and the harmonic plans, FFTW plans
 and per-thread workspaces (a [`SearchCache`](src/search.jl)) are built once and
 reused, so each additional file costs only its own search time. Measured on a
 32 MB `.fft`, single-threaded: one file 2.4 s, three files 4.8 s — i.e. ~1.2 s
@@ -646,7 +658,7 @@ the obvious-looking choice — has us search 6× riptide's band and reports us a
 
 The threading axis belongs to `CoherentSearch.jl` since riptide's C
 extension is built without OpenMP or explicit multi-threading, so `rseek`
-cannot use more cores. The thread performanance can be measured with
+cannot use more cores. The thread performance can be measured with
 `bench/thread_scaling.jl`, which times only the *warm in-process* search
 so that the fixed start-up cost does not contaminate the fit. On 48 cores
 (`bla0`, 2× AMD EPYC 7413, 2026-09-15), searching
@@ -703,9 +715,12 @@ the detector. Duty cycles are defined identically on both sides too.
 
 One pulsar in one observation says nothing about relative *sensitivity*, and the
 single-detection scatter is much larger than the gap above; that question is
-settled by the injection Monte Carlo described in
-`docs/Summary_and_Future_Work.md`
-§3.2, not by this table.
+settled by the injection Monte Carlo (`mc/`; results and caveats in
+`docs/comparison_points.md`), not by this table. The Monte Carlo also times
+every code per simulated observation on one machine, which is the cost figure
+to set beside its detection fractions: `rseek` costs 1.7x our runtime in the
+matched configuration, 3.1x in the narrow-fold-range configuration its authors
+recommend, and its deep configuration ~7x.
 
 ## The toy search
 
@@ -776,7 +791,9 @@ fundamentals, spin coverage to 800 Hz — at each card's best `--blocksize`,
 | RTX A400 | 6 | 131072 | 61.36 | 145.0 | **0.65x** |
 
 The reference is `fitzroy`'s 2× Xeon Silver 4114 at `-t 40` on the same file
-and band: 39.79 s, 94.1 ns/trial. The CPU still wins on a big enough machine: a
+and band: 39.79 s, 94.1 ns/trial. (The paper instead quotes one thread per
+physical core, `-t 20`, re-measured on 2026-09-25 at 40.1 s, which moves each
+ratio by under 1%.) The CPU still wins on a big enough machine: a
 32-core Threadripper PRO 7975WX (`-t 64`) takes 9.14 s, and 2× EPYC 7413
 (`-t 96`) take 10.02 s, faster than an RTX A4000. Against their own hosts'
 physical cores, the L40 is 3.4x a 2× Xeon Silver 4514Y (14.66 s at `-t 32`) and
