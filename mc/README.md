@@ -59,10 +59,28 @@ rsync eiger:'/data1/mc/run2/mcpatch_accel+coherent+rseek+rseekw_*' /data1/mc/run
 #     and rseek_B (1 in 10) on run 3's red indices, --hits-per-inj 8, 15 workers,
 #     ~78 s a realisation => ~16k a day.  All 84,871 would take ~5 days; the plan
 #     is to STOP IT after ~2 days (~33k), which is an unbiased subset.
+#   eiger, after `red` stops: `screen -dmS run5 bash mc/launch_run5.sh redwc` --
+#     rseek_WC (C on the whitened series) on EXACTLY the indices `red` finished.
+# HOW IT ENDED: white finished on its own (22,368, 2026-10-01).  `red` was stopped
+# at 33,010 on 2026-10-02 13:09 EDT; `redwc` ran on those 33,010 and finished by
+# itself 2026-10-04 08:13 EDT (~73 s a realisation at 15 workers), with per-worker
+# counts identical to `red`'s.  Results: "Run 5" below.
 # Then copy the patches to the analysis host's MATCHING directories (eiger's
-# /data1/mc/run3 is the live one; fitzroy's is a snapshot) and re-run go3.sh:
-rsync eiger:'/data1/mc/run3/mcpatch_rseek+rseekw_*' /data1/mc/run3/
+# /data1/mc/run3 is the live one; fitzroy's is a snapshot):
+rsync eiger:'/data1/mc/run3/mcpatch_rseek+rseekw_*' eiger:'/data1/mc/run3/mcpatch_rseekwc_*' /data1/mc/run3/
 # Patch records carry no `config`; C's is `rseek_c_config(dt)` at 7418f89.
+# The red analysis is on the PAIRED subset, not the whole of run 3: copy every
+# run-3 record (parents and patches) whose index the `red` pass finished into its
+# own directory, file names kept, and analyse that.  On eiger, 2026-10-04, at
+# be625f2 (~6 min for all three jobs in parallel; fitzroy took ~8 min):
+#   python subset_red33k.py                      # -> red33k/, 33,010 per file set
+#   python mc/mc_analyze.py red33k --fap 0.1
+#   python mc/mc_analyze.py red33k --fap 0.1 --match knee,band \
+#       --sections header,falarm,table,hits,knee,band,s50
+#   python mc/mc_quicklook.py red33k --fap 0.1 -o ql_r5wc_red33k.png \
+#       --methods prepfold_snr1,accelsearch,accelsearch_red,rseek_A,rseek_W,rseek_WC,rseek_B,coherent,coh+tier
+# (`subset_red33k.py` and `run_red5wc.sh`, the wrapper, are in SMR's
+# ~/Downloads/mc_claude/ with the reports, not in the repo.)
 
 # the whole report (combining runs is `cat`; this globs *.jsonl)
 $PIXI/python mc/mc_analyze.py mcout/
@@ -101,7 +119,7 @@ a subset rather than the study:
    one-off check in `docs/comparison_points.md` §11.
 
 **`--arms` takes a comma-separated set** (`all`, `prepfold`, `accel`, `rseek`,
-`rseekw`, `coherent`). Anything but `all` writes PATCH records that
+`rseekw`, `rseekc`, `rseekwc`, `coherent`). Anything but `all` writes PATCH records that
 `mc_analyze.load` merges into the full ones by index — and a patch **overwrites**
 the arm it re-ran, which is the point: it is how run 2's white records acquire
 their missing band tails. Only the arms' own timings are copied, never the shared
@@ -122,6 +140,83 @@ riptide, which is a site-packages copy rather than an editable install of
 change the binary `rseek_A` and `rseek_B` are being measured with, mid-study.
 Normalisation is kept — only the running median is skipped. Verified on a 3σ
 8-second wander: stock `rseek` reports S/N 301, the shim 608.
+
+## Run 5: riptide's recommended regime, and riptide on whitened red noise
+
+Two gaps Vincent Morello's review of the draft (2026-09-28) exposed, both about
+how riptide was configured rather than about us. Results and the paper-facing
+reading are in `docs/comparison_points.md`; this is what the arms are.
+
+**Configuration C (`rseek_C`, `--arms rseekc`).** Config A folds 1.33 ms – 10 s
+into `bins_min 20 / bins_max 120`. That is far outside the `bins_max ≈ 1.1 ×
+bins_min` regime `ffa_search`'s docstring asks for. `b` sawtooths across the
+whole range in every downsampling cycle, and the width bank (built from
+`bins_min`) stops at `w = 6`, i.e. 6.5% duty at `b = 92`. C keeps A's 20–120
+only below `120 × dt` (7.2 ms at 60 µs), where nothing deeper fits, and folds
+**120–140** bins from there to 10 s. So slow pulsars are folded at about our
+deepest rung, with riptide's bank reaching 30% duty. Two invocations, candidates
+concatenated, one threshold on the union, exactly as `rseek_B`. On a 2^20 probe
+it evaluates 1.34x A's periods, all of the extra above 7.2 ms. **The paper leads
+with C** as riptide in its recommended regime; A stays as the coverage- and
+work-matched arm.
+
+**How riptide meets PRESTO's `rednoise` (`rseek_W`, `rseek_WC`).** riptide's
+own dereddening is a 4-s running median in the time domain, a high-pass at
+~0.25 Hz that cannot touch a higher knee. The whitened arms instead take the
+spectrum we already make for `coherent`:
+
+1. `realfft` the raw series, and `rednoise` it. `rednoise` divides each Fourier
+   bin by a running median of the local power (blocks growing with frequency), so
+   the spectrum is flat at mean power 1. This step is shared with `coherent`,
+   whose input it is, and is charged to the `rednoise` timing, not to riptide.
+2. `realfft -inv` on `_red.fft` gives back a time series with the red noise
+   removed the way we remove it. Its standard deviation is ~1e-3, not 1.
+3. `rseek_nodered.py` runs riptide with `ffa_search(deredden=False)`. Its
+   running median is off, so the data are not high-passed a second time, and its
+   normalisation is kept, which fixes the ~1e-3 scale. The inverse transform is
+   charged to each whitened arm.
+
+`rseek_W` does this with config A, and `rseek_WC` with config C. On white noise
+the round trip costs riptide about a point (`rseek_W` 49.0 vs `rseek_A` 50.2).
+On red noise it **fully restores riptide's calibration**: the matched cut is
+7.55 (W) / 7.65 (WC) in **every** knee bin, against `rseek_A`'s 7.55 → 250.
+
+**Where it ran.** `white` (C) on fitzroy, 22,368 white realisations, the run-4
+set. `red` (A, W, B 1-in-10) and then `redwc` (WC) on eiger, both on the same
+33,010 of run 3's red realisations, with `--hits-per-inj 8`. Analysis on eiger,
+2026-10-04, at `be625f2`, on the paired subset (see "Running it").
+
+**One-host cost** (the only valid source for a speed ratio between these arms):
+idle fitzroy, 1 worker, 49 run-4 white realisations (the first dropped), all arms
+on the same noise, process start-up included:
+
+| arm | median s / realisation | vs `coherent` |
+|---|---|---|
+| `rseek_C` | 61.8 | 3.07x |
+| `rseek_A` | 34.3 | 1.71x |
+| `coh+tier` | 25.7 | 1.28x |
+| `coherent` | 20.1 | 1.00x |
+| `coherent_tier` | 5.6 | 0.28x |
+
+Raw records in `fitzroy:/data1/mc/timing5/`. The run-5 medians under load
+(`rseek_C` 87.0 s on fitzroy at 19 workers; `rseek_WC` 60.7 s, `rseek_W` 32.5 s
+and `rseek_A` 32.2 s on eiger at 15) carry contention and are not for ratios.
+
+**The runner-up rescue manufactures coincidences where a code floods — read this
+before quoting any red `rseek_A` cell.** With `--hits-per-inj`, `mc_analyze`
+replaces a junk best hit by the best runner-up within `--hit-tol`. Where a code
+emits hundreds of red-noise candidates, one of the eight runners-up lands within
+half a bin of the target by chance, and the rescue scores it a detection. On the
+red subset, band-matched, **37% of `rseek_A`'s detections at knee 15–50 Hz have
+a statistic above 23** — no injection (S/N ≤ 11.5) can produce one — and 80% of
+those came in through the rescue. Its cell reads 53.0%, against 36.8% on the whole of run 3 before
+runners-up, and ≤38.4% once only the impossible ones are dropped. The
+sideband estimate of "coincidences remaining" assumes one hit per injection and
+does not see this. `rseek_B` is barely touched (≤1.1%), and the whitened arms,
+`coherent` and `accelsearch` not at all (0.0% in every cell). **Treat red
+band-matched `rseek_A` cells at knee ≥ 2 Hz as unmeasured**; the whitened arms are
+the clean statement of riptide on red noise. A fix (rescue only below a
+plausibility ceiling, or charge the rescue its own sideband) is not in yet.
 
 ## The pieces
 
@@ -348,9 +443,9 @@ the 2x2 is paid for out of the questions run 2 closed.
   against 11.2 on white, and its top false alarm back at 7.5 from 155.8. So
   whitening restores riptide exactly and costs its fast detections nothing. The
   0.5 Hz pulsar stays gone, because at that knee the red noise really did bury it
-  (our arm reads 5.79 there). **There is deliberately no whitened-rseek arm** --
-  per-band matching already makes the fast end a fair comparison, and the arm
-  costs ~28 s a realisation to answer a question this one-off already answers.
+  (our arm reads 5.79 there). That one-off is now measured with an `n` behind
+  it: `rseek_W` (run 4 white, run 5 red) and `rseek_WC` (run 5 red) -- see
+  "Run 5". (This paragraph used to say there would deliberately be no such arm.)
 
   **Still to write, deliberately:** the degradation curve (S/N at 50% detection
   against knee) and the comparison to Lazarus's factor 1.1–2. Those depend on
@@ -387,7 +482,10 @@ from the TPA width population at continuous injected S/N over 5.5–11.5, then t
 | `accelsearch` | `-numharm 16 -zmax 0` on the raw `.fft` | every |
 | `accelsearch_red` | the same on `_red.fft` | every |
 | `rseek_A` | `bmin 20 / bmax 120`, matching our coverage exactly | every |
-| `rseek_B` | the deep 4-range tiling, 4.05x the cost | 1-in-5 |
+| `rseek_B` | the deep 4-range tiling, 4.05x the cost | 1-in-5 (run 2), 1-in-10 (runs 3–5) |
+| `rseek_W` | config A on the `rednoise`-whitened series, riptide's dereddening off | runs 4, 5 (patches) |
+| `rseek_C` | 20–120 bins below 7.2 ms, 120–140 above — riptide's recommended regime | run 5 white (patch) |
+| `rseek_WC` | config C on the whitened series | run 5 red (patch) |
 | `coherent` | the shipped defaults (`nharms 60`, `maxdecim 6`, `hifreq 125`) | every |
 | `coherent_tier` | `nharms 120 maxdecim 12` below 5 Hz — §4's proposal | every |
 | `coherent_deep` | `nharms 120 maxdecim 12` over the whole band | 1-in-5 |
@@ -565,6 +663,12 @@ not — raise `--deep-every`, or lower `--workers`.
   changing it would change which realisations are empty and break run 2's
   pairing with run 3. The symptom is a subset whose empty fraction is 0% or 100%
   instead of `1/noise_every`, with nothing reporting an error.
+* **A fix for one coincidence hazard can open another.** `--hits-per-inj` was
+  added so a junk best hit could not displace a real one. In a flooded cell it
+  also lets a junk *runner-up* within half a bin be rescued as a detection, and
+  that inflated red `rseek_A` from 36.8% to 53.0% at the worst knee. The symptom
+  is again detection that rises with the noise, here with matched cuts (55.8 at
+  1–5 Hz) that no injected pulsar can reach. See "Run 5".
 * **Buffered output hides a slow script.** Every analysis command here prints as
   it goes; run them with `python -u`, and never pipe into `head`/`tail` while
   waiting, or the first output you see is the last.
