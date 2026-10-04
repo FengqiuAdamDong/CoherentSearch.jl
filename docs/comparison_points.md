@@ -799,6 +799,25 @@ points. `rseek_B` and `accelsearch` were not in this run; their ratios below are
 from eiger under load (`rseek_B` 7.2x, `accelsearch` 1/11). That is adequate
 for a ratio as long as both arms ran in the same job.
 
+**Repeated with every arm on eiger (2026-10-04), which the paper quotes.** Idle
+Xeon w5-3433, one worker, the same 50 run-2 indices with the first dropped,
+`--arms accel,rseek,rseekc,coherent --deep-every 1`. Records:
+`eiger:/data1/mc/timing6/`, summarized by the paper's
+`figures/make_timing_summary.py`. Median s (IQR):
+
+| arm | eiger | vs `coherent` | fitzroy (above) |
+|---|---|---|---|
+| `rseek_B` | 79.09 (79.05–79.19) | **7.29x** | — |
+| `rseek_C` | 34.82 (34.78–34.87) | **3.21x** | 3.07x |
+| `rseek_A` | 18.68 (18.64–18.73) | **1.72x** | 1.71x |
+| `coh+tier` | 13.94 | 1.29x | 1.28x |
+| `coherent` | 10.84 (10.81–10.88) | 1.00x | 1.00x |
+| `coherent_tier` | 3.10 | 0.29x | 0.28x |
+| `accelsearch` | 0.78 (0.76–0.83) | 0.07x (1/13.9) | — |
+
+The two hosts agree on every shared ratio to 5%. The shared `realfft` +
+`rednoise` (~0.8 s) is in no arm.
+
 **The loaded medians are not ratios.** Under 15–19 workers the same arms read
 `rseek_C` 87.0 s (fitzroy, run 5), `rseek_A` 29.5 s and `coherent` 17.3 s
 (eiger, run 4). Read across hosts that is 5.0x, not 3.1x. A one-worker idle
