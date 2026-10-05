@@ -62,12 +62,53 @@ function write_inf(outpath, infpath, N, epoch)
     return outpath
 end
 
-function main(args)
+"""
+    demod_file(input, output; accel, jerk, snap, v0=0.0) -> (n_in, n_out)
+
+Apply the remap to `input` and write `output` (+ beside it, an updated `.inf`).
+Reads `input`'s `.inf` for N/dt/epoch.
+"""
+function demod_file(input, output; accel = 0.0, jerk = 0.0, snap = 0.0, v0 = 0.0)
+    infpath = replace(input, r"\.dat$" => ".inf")
+    outinf = replace(output, r"\.dat$" => ".inf")
+    N, dt, epoch = parse_inf(infpath)
+    raw = Vector{Float32}(undef, N)
+    open(input, "r") do io
+        read!(io, raw)
+    end
+    length(raw) == N || error("$input holds $(length(raw)) floats, .inf says $N")
+
+    # Zero-mean before resampling.  The remap can leave a few sample holes
+    # (uncovered indices), which scatter to zero; on data with a large DC
+    # baseline those holes read as huge spikes and their comb swamps the
+    # band.  The Python original never sees this because `load_data` calls
+    # `TimeSeries.normalise` first -- this is the same de-meaning.
+    raw .-= sum(raw) / length(raw)
+
+    # Anchor = midpoint of first/last sample, exactly as utils.anchor_mjd
+    # (len(ts.data)*tsamp after the first sample, so the midpoint sits at N/2).
+    reference_mjd = epoch + 0.5 * N * dt / 86400.0
+    tstart_ind = round(Int, (epoch - reference_mjd) * 86400.0 / dt)
+
+    ts_new, tstart_new = resample_ts_shift_snap(
+        raw, accel, jerk, snap, dt, tstart_ind; v0 = v0)
+
+    # PRESTO's realfft requires an even sample count; the remap can land on an
+    # odd length, so drop the final sample (one bin ~ dt seconds).
+    if isodd(length(ts_new))
+        ts_new = ts_new[1:end-1]
+    end
+
+    new_epoch = reference_mjd + tstart_new * dt / 86400.0
+    write(output, ts_new)
+    write_inf(outinf, infpath, length(ts_new), new_epoch)
+    return N, length(ts_new)
+end
+
+function demod_main(args)
     isempty(args) && error("usage: demod_dat.jl IN.dat OUT.dat --accel A --jerk J --snap S")
     input = args[1]
     output = args[2]
-    infpath = replace(input, r"\.dat$" => ".inf")
-    outinf = replace(output, r"\.dat$" => ".inf")
     accel = 0.0; jerk = 0.0; snap = 0.0; v0 = 0.0
     i = 3
     while i <= length(args)
@@ -87,40 +128,9 @@ function main(args)
         i += 2
     end
 
-    N, dt, epoch = parse_inf(infpath)
-    raw = Vector{Float32}(undef, N)
-    open(input, "r") do io
-        read!(io, raw)
-    end
-    length(raw) == N || error("$input holds $(length(raw)) floats, .inf says $N")
-
-    # Zero-mean before resampling.  The remap can leave a few sample holes
-    # (uncovered indices), which scatter to zero; on data with a large DC
-    # baseline those holes read as huge spikes and their comb swamps the
-    # band.  The Python original never sees this because `load_data` calls
-    # `TimeSeries.normalise` first -- this is the same de-meaning.
-    m = sum(raw) / length(raw)
-    raw .-= m
-
-    # Anchor = midpoint of first/last sample, exactly as utils.anchor_mjd
-    # (len(ts.data)*tsamp after the first sample, so the midpoint sits at N/2).
-    reference_mjd = epoch + 0.5 * N * dt / 86400.0
-    tstart_ind = round(Int, (epoch - reference_mjd) * 86400.0 / dt)
-
-    ts_new, tstart_new = resample_ts_shift_snap(
-        raw, accel, jerk, snap, dt, tstart_ind; v0 = v0)
-
-    # PRESTO's realfft requires an even sample count; the remap can land on an
-    # odd length, so drop the final sample (one bin ~ dt seconds).
-    if isodd(length(ts_new))
-        ts_new = ts_new[1:end-1]
-    end
-
-    new_epoch = reference_mjd + tstart_new * dt / 86400.0
-    write(output, ts_new)
-    write_inf(outinf, infpath, length(ts_new), new_epoch)
+    N, nout = demod_file(input, output; accel = accel, jerk = jerk, snap = snap, v0 = v0)
     @printf("demod_dat: %s -> %s  (%d -> %d samples)  a=%g j=%g s=%g\n",
-            input, output, N, length(ts_new), accel, jerk, snap)
+            input, output, N, nout, accel, jerk, snap)
 end
 
-abspath(PROGRAM_FILE) == abspath(@__FILE__) && main(ARGS)
+abspath(PROGRAM_FILE) == abspath(@__FILE__) && demod_main(ARGS)
