@@ -95,9 +95,35 @@ crossval/             Python-as-oracle accuracy + speed cross-validation
 compare/              head-to-head benchmark against riptide's rseek
 mc/                   the injection Monte Carlo: sensitivity vs. the other codes
 bench/                microbenchmarks and phase timings (its own environment)
+demod/                binary-pulsar demodulation: grid derivation, time-remap,
+                      full sweep (see demod/README.md)
 docs/                 design notes, the GPU log, and the measurement record
 sysimage/             optional PackageCompiler sysimage for production runs
 ```
+
+## Binary pulsar demodulation (`demod/`)
+
+An orbiting pulsar's spin period is stretched and squeezed by the line-of-sight
+Doppler, which destroys the phase coherence a coherent harmonic sum needs.
+`demod/` searches one observation for such a pulsar by **demodulating** — undoing
+— the orbit before searching: derive a grid of trial orbital/kinematic
+parameters, apply the exact time-remap at every grid point, then run the ordinary
+search on each result.
+
+`nsns_grid.py` derives the grid in one of three models:
+
+- **`ajs`** — an accel/jerk/snap cubic approximation of the orbit's LOS velocity;
+  general (eccentric, relativistic) but only exact if the cubic can track the
+  orbit within the phase budget;
+- **`circular`** — an exact pure-Keplerian circular-orbit grid in `(ω_b, x, A_T)`,
+  whose demod removes the whole Roemer track;
+- **`hybrid`** — circular below a break period and ajs at/above it. The break is
+  placed where the ajs model's per-period coverage collapses (it is non-monotonic,
+  dipping near `p_o ~ T_obs`), so each regime covers the orbits it is best at.
+
+The full derivation of the grid spacings, the phase-budget guarantee, the
+demodulation operator, and worked examples are in **`demod/README.md`**. The
+end-to-end driver is `demod/run_nsns_sweep.sh` (`MODE=ajs|circular|hybrid`).
 
 ## Design notes
 

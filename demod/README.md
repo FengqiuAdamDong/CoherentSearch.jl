@@ -1,3 +1,13 @@
+<!--
+Math-notation note: GitHub runs its Markdown pass BEFORE MathJax, and Markdown
+treats a backslash before ASCII punctuation (\, \; \! \_ \{ \} \#) as an escape,
+stripping one backslash. So every such TeX macro here is written with a DOUBLE
+backslash (\\, \\; \\_ ...) so that exactly one survives into MathJax. Row
+breaks in cases/aligned are written \cr, not \\[Npt] (which the same pass
+mangles). Do not "tidy" these backslashes away, and re-check with the GitHub
+Markdown API if you add new math.
+-->
+
 # `demod/` — coherent binary-pulsar demodulation
 
 This directory searches a **single** PRESTO `.fft` observation for a pulsar in a
@@ -52,16 +62,16 @@ Everything below uses these symbols. Code names are in `monospace`.
 
 | symbol | code | meaning |
 |---|---|---|
-| $c$ | `C` | speed of light, $299792458\ \mathrm{m\,s^{-1}}$ |
+| $c$ | `C` | speed of light, $299792458\ \mathrm{m\\,s^{-1}}$ |
 | $G$ | `G` | gravitational constant, $6.67430\times10^{-11}$ |
 | $M_\odot$ | `SOLAR_MASS` | solar mass, $1.989\times10^{30}\ \mathrm{kg}$ |
-| $T$ | `t_obs` | observation length $= N\,dt$ [s] |
+| $T$ | `t_obs` | observation length $= N\\,dt$ [s] |
 | $N$ | `N` | number of time-series bins (from `.inf`) |
 | $dt$ | `dt` | time-series bin width [s] (from `.inf`) |
 | $p_0$ | `p0` | pulsar spin period [s] (use the **minimum** of the search range) |
 | $\dot p$ | `pdot` | intrinsic period derivative [s/s] (in the truth) |
 | $\tau$ | `tau` | time measured from the anchor: $\tau = t-t_\text{anchor}$ |
-| $p_o$ | `p_o` | orbital period [yr] (scanned; internally $p_{o,s}=p_o\,Y\!E\!A\!R_S$ [s]) |
+| $p_o$ | `p_o` | orbital period [yr] (scanned; internally $p_{o,s}=p_o\\,Y\\!E\\!A\\!R_S$ [s]) |
 | $e$ | `e` | orbital eccentricity (scanned) |
 | $\sin i$ | `sin_i` | sine of orbital inclination (scanned) |
 | $\omega_\text{peri}$ | `omega_peri` | argument of periastron [rad] (scanned) |
@@ -80,7 +90,7 @@ Everything below uses these symbols. Code names are in `monospace`.
 | $v_0$ | `v0` | constant velocity term (absorbed by the period search) |
 | $a,j,s$ | `a,j,s` | LOS accel [m/s²], jerk [m/s³], snap [m/s⁴] |
 | $\varepsilon$ | `phase_tol_cycles` | total phase-drift budget [cycles], default 0.1 |
-| $\varepsilon_m$ | `phase_tol_m` | the same budget as a path length [m], $\varepsilon_m=\varepsilon\,c\,p_0$ |
+| $\varepsilon_m$ | `phase_tol_m` | the same budget as a path length [m], $\varepsilon_m=\varepsilon\\,c\\,p_0$ |
 | $\Lambda$ | `trunc_phase` | the segment's own integrated truncation [m] |
 | $\Lambda_\text{max}$ | `trunc_max` | worst kept segment's truncation [m] |
 | $B_m$ | `budget_m` | budget left for grid mismatch [m], $B_m=\varepsilon_m-\Lambda_\text{max}$ |
@@ -126,7 +136,7 @@ constants):
 An orbiting pulsar's pulses arrive at
 
 $$
-t_\text{arr}(t) \;=\; t + \Delta(t),
+t_\text{arr}(t) \\;=\\; t + \Delta(t),
 $$
 
 where $t$ is the pulse's proper (emission) time and $\Delta$ is the varying
@@ -134,9 +144,9 @@ Roemer-type propagation delay. To first order the observed period is the
 intrinsic period stretched by the LOS Doppler factor,
 
 $$
-p_\text{obs}(t) \;=\; p_\text{intr}(t)\Bigl(1+\frac{v_\text{los}(t)}{c}\Bigr),
+p_\text{obs}(t) \\;=\\; p_\text{intr}(t)\Bigl(1+\frac{v_\text{los}(t)}{c}\Bigr),
 \qquad
-p_\text{intr}(t) = p_0 + \dot p\,t .
+p_\text{intr}(t) = p_0 + \dot p\\,t .
 $$
 
 The code's `observed_period(t, p0, pdot, ω_b, a_psini, A_T, e, ω_peri, m_c, m_p, gr)`
@@ -148,21 +158,21 @@ Keplerian Roemer term is kept.
 The **truth velocity** used for the fit is then
 
 $$
-v_\text{true}(t) \;=\; c\left(\frac{p_\text{obs}(t)}{p_0}-1\right)
-\quad\text{(code: \texttt{true\_velocity})},
+v_\text{true}(t) \\;=\\; c\left(\frac{p_\text{obs}(t)}{p_0}-1\right)
+\quad\text{(code: \texttt{true\\_velocity})},
 $$
 
 i.e. the apparent LOS velocity relative to the nominal period $p_0$. Because
-$p_\text{intr}=p_0+\dot p\,t$, the intrinsic spin-down enters as a linear ramp in
-velocity — a **pseudo-acceleration** $c\,\dot p/p_0$ — which the cubic fit simply
+$p_\text{intr}=p_0+\dot p\\,t$, the intrinsic spin-down enters as a linear ramp in
+velocity — a **pseudo-acceleration** $c\\,\dot p/p_0$ — which the cubic fit simply
 absorbs into its $a$ coefficient.
 
 For a **circular** orbit ($e=0$, Roemer only, no GR) the delay is a pure sinusoid,
 
 $$
-\Delta(t) = x\,\sin(\omega_b t + A_T),
+\Delta(t) = x\\,\sin(\omega_b t + A_T),
 \qquad
-\frac{v_\text{los}(t)}{c} = \dot\Delta(t) = x\,\omega_b\cos(\omega_b t+A_T),
+\frac{v_\text{los}(t)}{c} = \dot\Delta(t) = x\\,\omega_b\cos(\omega_b t+A_T),
 $$
 
 where $x=a_p\sin i/c$ is in light-seconds (so $\Delta$ is in seconds). This is the
@@ -173,27 +183,27 @@ track the `circular` mode removes exactly (`circular_voc` in `resample.jl`).
 Demodulating means remapping the time axis so the pulses become periodic. If the
 demodulated series has a residual LOS-velocity error $\delta v(\tau)$, then over a
 time $\mathrm{d}\tau$ the pulse-arrival time drifts by
-$\mathrm{d}(\Delta t) = \delta v\,\mathrm{d}\tau / c$, and the accumulated **spin
+$\mathrm{d}(\Delta t) = \delta v\\,\mathrm{d}\tau / c$, and the accumulated **spin
 phase** error in cycles is that delay divided by $p_0$:
 
 $$
-\Delta\phi \;=\; \frac{1}{c\,p_0}\int \delta v\,\mathrm{d}\tau .
+\Delta\phi \\;=\\; \frac{1}{c\\,p_0}\int \delta v\\,\mathrm{d}\tau .
 $$
 
-So a **path-length** error of $\Lambda$ metres is $\Lambda/(c\,p_0)$ cycles, and a
+So a **path-length** error of $\Lambda$ metres is $\Lambda/(c\\,p_0)$ cycles, and a
 phase budget of $\varepsilon$ cycles is a path budget of
 
 $$
-\boxed{\;\varepsilon_m = \varepsilon\,c\,p_0\;}
-\qquad\text{(code: \texttt{phase\_tol\_m}).}
+\boxed{\\;\varepsilon_m = \varepsilon\\,c\\,p_0\\;}
+\qquad\text{(code: \texttt{phase\\_tol\\_m}).}
 $$
 
 This is the bridge between the physics (velocities, metres) and the grid budget
 (cycles). The code measures the integrated truncation `integrated_trunc` as
 
 $$
-\Lambda \;=\; \max_{\tau}\left|\int_{\tau_\text{first}}^{\tau}
-\delta v(\tau')\,\mathrm{d}\tau'\right| ,
+\Lambda \\;=\\; \max_{\tau}\left|\int_{\tau_\text{first}}^{\tau}
+\delta v(\tau')\\,\mathrm{d}\tau'\right| ,
 $$
 
 i.e. the maximum absolute cumulative integral of the residual velocity, starting
@@ -207,7 +217,7 @@ For the `midpoint` anchor the first sample is at $\tau=-T/2$.
 A grid point is applied by remapping the time coordinate:
 
 $$
-u(\tau) \;=\; \int_0^{\tau}\frac{\mathrm{d}t'}{1+v_\text{inj}(t')/c},
+u(\tau) \\;=\\; \int_0^{\tau}\frac{\mathrm{d}t'}{1+v_\text{inj}(t')/c},
 $$
 
 where $v_\text{inj}$ is the **injected** velocity (the sign that, when injected
@@ -222,9 +232,9 @@ DC spike that those zero holes would otherwise make.
 $1/(1+x)=\sum_n(-x)^n$ with $x=v_\text{inj}/c$ and integrating term by term gives
 
 $$
-u(\tau) \;=\; \tau - \frac{1}{c}\!\int v_\text{inj}
-      + \frac{1}{c^2}\!\int v_\text{inj}^2
-      - \frac{1}{c^3}\!\int v_\text{inj}^3 + \cdots
+u(\tau) \\;=\\; \tau - \frac{1}{c}\\!\int v_\text{inj}
+      + \frac{1}{c^2}\\!\int v_\text{inj}^2
+      - \frac{1}{c^3}\\!\int v_\text{inj}^3 + \cdots
 $$
 
 The resampler substitutes $v_\text{inj} = -v$, where
@@ -233,9 +243,9 @@ the **trial coefficients as given** (`_velocity_poly`). The sign flip cancels th
 series alternation, so all terms add:
 
 $$
-u(\tau) \;=\; \tau + \frac{1}{c}\!\int v
-      + \frac{1}{c^2}\!\int v^2
-      + \frac{1}{c^3}\!\int v^3 + \cdots
+u(\tau) \\;=\\; \tau + \frac{1}{c}\\!\int v
+      + \frac{1}{c^2}\\!\int v^2
+      + \frac{1}{c^3}\\!\int v^3 + \cdots
 $$
 
 Orders are added until the next order's peak contribution over the span is below
@@ -269,16 +279,16 @@ For every scanned orbit $(p_o,\sin i,e,\omega_\text{peri})$ and every segment
 start phase $t_0$, the code fits the model
 
 $$
-v_\text{model}(\tau) \;=\; v_0 + a\,\tau + \frac{j}{2}\tau^2 + \frac{s}{6}\tau^3
+v_\text{model}(\tau) \\;=\\; v_0 + a\\,\tau + \frac{j}{2}\tau^2 + \frac{s}{6}\tau^3
 $$
 
-to $v_\text{true}(t)$ over the span $[t_0,\,t_0+T]$, sampled at `nsamp` points
+to $v_\text{true}(t)$ over the span $[t_0,\\,t_0+T]$, sampled at `nsamp` points
 (`fit_velocity_model`). The anchor is
 
 $$
 t_\text{anchor} =
 \begin{cases}
-t_0, & \texttt{anchor}=\texttt{start},\\[2pt]
+t_0, & \texttt{anchor}=\texttt{start},\cr
 t_0 + T/2, & \texttt{anchor}=\texttt{midpoint},
 \end{cases}
 \qquad \tau = t - t_\text{anchor}.
@@ -292,13 +302,13 @@ the max instantaneous residual `trunc` (m/s, used only for reporting) and the
 **integrated** truncation
 
 $$
-\Lambda \;=\; \texttt{integrated\_trunc}(\text{resid},\tau)
-       \;=\; \max_\tau\Bigl|\int_{\tau_\text{first}}^{\tau}\text{resid}\,\mathrm{d}\tau'\Bigr|
+\Lambda \\;=\\; \texttt{integrated\\_trunc}(\text{resid},\tau)
+       \\;=\\; \max_\tau\Bigl|\int_{\tau_\text{first}}^{\tau}\text{resid}\\,\mathrm{d}\tau'\Bigr|
        \quad [\text{m}],
 $$
 
 the accumulated path-length error of the best cubic against the truth
-(`integrated_trunc`). In cycles this is $\Lambda/(c\,p_0)$.
+(`integrated_trunc`). In cycles this is $\Lambda/(c\\,p_0)$.
 
 Why is $v_0$ always fitted but never gridded? A constant velocity offset is just a
 constant shift of the apparent spin frequency, which the coherent search's period
@@ -311,7 +321,7 @@ A segment is **feasible** iff its own best-fit cubic already accumulates less th
 the budget (`mark_feasible`):
 
 $$
-\Lambda < \varepsilon_m \qquad (\texttt{trunc\_phase} < \texttt{phase\_tol\_m}).
+\Lambda < \varepsilon_m \qquad (\texttt{trunc\\_phase} < \texttt{phase\\_tol\\_m}).
 $$
 
 No grid density can repair a truncation larger than the budget — the cubic is the
@@ -335,7 +345,7 @@ Of the remaining feasible segments, the worst-phase-error `-drop_pct` percent ar
 discarded (`apply_drop`), pooled over **all** orbits:
 
 * sort the feasible segments by $\Lambda$ ascending (cheapest first),
-* keep $n_\text{keep} = \max\!\big(\operatorname{round}(n_\text{feas}(1-\text{drop\_pct}/100)),\,1\big)$,
+* keep $n_\text{keep} = \max\\!\big(\operatorname{round}(n_\text{feas}(1-\text{drop\\_pct}/100)),\\,1\big)$,
 * the rest stay `feasible` but lose `kept`.
 
 Dropping the worst segments is what lets the grid be coarse: the worst **kept**
@@ -346,20 +356,20 @@ plots report the claimed fraction so this cost is explicit).
 
 Let the grid point differ from the true best-fit coefficients by
 $\delta a,\delta j,\delta s$, each at most half a grid spacing. The extra velocity
-is $\delta v = \delta a\,\tau + \tfrac{\delta j}{2}\tau^2 + \tfrac{\delta s}{6}\tau^3$,
+is $\delta v = \delta a\\,\tau + \tfrac{\delta j}{2}\tau^2 + \tfrac{\delta s}{6}\tau^3$,
 and the extra path length accumulated from the span start is
 
 $$
-E(\tau) \;=\; \int_{\tau_\text{first}}^{\tau}\delta v\,\mathrm{d}\tau'
-\;=\; \delta a\,\frac{\tau^2-\tau_\text{first}^2}{2}
-    + \delta j\,\frac{\tau^3-\tau_\text{first}^3}{6}
-    + \delta s\,\frac{\tau^4-\tau_\text{first}^4}{24}.
+E(\tau) \\;=\\; \int_{\tau_\text{first}}^{\tau}\delta v\\,\mathrm{d}\tau'
+\\;=\\; \delta a\\,\frac{\tau^2-\tau_\text{first}^2}{2}
+    + \delta j\\,\frac{\tau^3-\tau_\text{first}^3}{6}
+    + \delta s\\,\frac{\tau^4-\tau_\text{first}^4}{24}.
 $$
 
 The worst case over the span bounds the path error by
 
 $$
-|E| \;\le\; |\delta a|\,L_a + |\delta j|\,L_j + |\delta s|\,L_s,
+|E| \\;\le\\; |\delta a|\\,L_a + |\delta j|\\,L_j + |\delta s|\\,L_s,
 $$
 
 where the **lever arms** are
@@ -393,12 +403,12 @@ $$
 These are exactly the entries of `PHASE_LEVERS`:
 
 $$
-\texttt{start}:[T^2/2,\;T^3/6,\;T^4/24],\qquad
-\texttt{midpoint}:[T^2/8,\;T^3/24,\;T^4/384].
+\texttt{start}:[T^2/2,\\;T^3/6,\\;T^4/24],\qquad
+\texttt{midpoint}:[T^2/8,\\;T^3/24,\\;T^4/384].
 $$
 
 A unit coefficient offset on an axis therefore costs at most $L_x$ metres of path
-error, i.e. $L_x/(c\,p_0)$ cycles.
+error, i.e. $L_x/(c\\,p_0)$ cycles.
 
 ### 4.6 Step 6 — splitting the leftover budget
 
@@ -407,7 +417,7 @@ What remains for grid mismatch is
 
 $$
 B_m = \varepsilon_m - \Lambda_\text{max}
-\qquad(\texttt{budget\_m}),
+\qquad(\texttt{budget\\_m}),
 $$
 
 which is positive because every kept segment passed the feasibility gate. The
@@ -419,7 +429,7 @@ grid is chosen by `allocate_spacings(B_m, [L_a,L_j,L_s], ranges, mask)`:
    the range midpoint (`grids_from_spec`). Its worst-case offset is half the range,
    so it costs a *fixed* amount of path error
    $$
-   F = \sum_{x\ \text{saturated}} \frac{\text{hi}_x-\text{lo}_x}{2}\,L_x .
+   F = \sum_{x\ \text{saturated}} \frac{\text{hi}_x-\text{lo}_x}{2}\\,L_x .
    $$
    Axes that are off (not in `mask`) cost nothing.
 3. If $B_m - F \le 0$ the budget cannot even cover the fixed costs → return
@@ -427,14 +437,14 @@ grid is chosen by `allocate_spacings(B_m, [L_a,L_j,L_s], ranges, mask)`:
 4. **Equal split.** The remaining budget is split *equally* over the
    $n_\text{act}$ still-active axes:
    $$
-   \epsilon_x \;=\; \frac{B_m - F}{n_\text{act}} \quad\text{(same for every active axis).}
+   \epsilon_x \\;=\\; \frac{B_m - F}{n_\text{act}} \quad\text{(same for every active axis).}
    $$
    Each active axis may then be off by at most half a spacing, and the resulting
    path error is at most $\epsilon_x$:
    $$
-   \frac{D_x}{2}\,L_x = \epsilon_x
+   \frac{D_x}{2}\\,L_x = \epsilon_x
    \quad\Longrightarrow\quad
-   \boxed{\,D_x = \frac{2\,\epsilon_x}{L_x}\,}.
+   \boxed{\\,D_x = \frac{2\\,\epsilon_x}{L_x}\\,}.
    $$
    This is the line `spac[x] = 2.0*eps/levers[x]`.
 5. With these spacings, add up the per-axis contributions: the active axes
@@ -469,7 +479,7 @@ $$
 n_x = \Bigl\lceil \frac{\text{hi}_x-\text{lo}_x}{D_x}\Bigr\rceil + 1
 $$
 
-trials at $\text{lo}_x + D_x\cdot\{0,1,\dots,n_x-1\}$ (`grids_from_spec`). The `+1`
+trials at $\text{lo}_x + D_x\cdot\\{0,1,\dots,n_x-1\\}$ (`grids_from_spec`). The `+1`
 means the last point reaches at least $\text{hi}_x$ (it may overshoot by up to one
 spacing), so **every** value in the range is within $D_x/2$ of a grid point — the
 half-spacing assumption used in Step 5. A saturated or off axis gets exactly one
@@ -483,17 +493,17 @@ segment** (`worst = max kept trunc_phase`). It refits that segment to get its tr
 residual `resid_v` and axis `tau`, then adds the grid-quantisation velocity
 
 $$
-q(\tau) = \delta a\,\tau + \frac{\delta j}{2}\tau^2 + \frac{\delta s}{6}\tau^3,
+q(\tau) = \delta a\\,\tau + \frac{\delta j}{2}\tau^2 + \frac{\delta s}{6}\tau^3,
 \qquad \delta x \in \pm D_x/2,
 $$
 
 and computes the exact accumulated phase
-$\texttt{integrated\_trunc}(\text{resid}_v+q,\tau)/(c\,p_0)$. It checks all **8
+$\texttt{integrated\\_trunc}(\text{resid}_v+q,\tau)/(c\\,p_0)$. It checks all **8
 corners** of the cell $\delta x=\pm D_x/2$ (worst-case signs), plus `n_mc` random
 draws uniform in $[-D_x/2,D_x/2]^3$. The guarantee holds iff
 
 $$
-\max_\text{corners}\bigl(\text{integrated cycles}\bigr) \le \varepsilon\,(1+10^{-9}).
+\max_\text{corners}\bigl(\text{integrated cycles}\bigr) \le \varepsilon\\,(1+10^{-9}).
 $$
 
 The printed worst corner is the number to trust; the Monte-Carlo max/median show
@@ -516,7 +526,7 @@ Validation ... worst grid corner : 0.0855 cycles ... guarantee holds: True
 ```
 
 Check the arithmetic against the formulas (midpoint anchor, $T=1509.9494$ s,
-$c\,p_0=2.99792458\times10^8$ m):
+$c\\,p_0=2.99792458\times10^8$ m):
 
 * $L_a=T^2/8=2.84993\times10^5$, $L_j=T^3/24=1.43442\times10^8$,
   $L_s=T^4/384=1.35369\times10^{10}$.
@@ -548,13 +558,13 @@ The orbit-induced residual spin phase (cycles) — the quantity the budget bound
 is the difference of the delays over $p_0$:
 
 $$
-\Phi(t) \;=\; \frac{x}{p_0}\sin(\omega_b t + A_T),
+\Phi(t) \\;=\\; \frac{x}{p_0}\sin(\omega_b t + A_T),
 \qquad t\in[0,T],
 $$
 
 with $t$ the **absolute** time since the observation start (because $A_T$ is
 anchored at the start; `demod_dat.jl` maps the midpoint anchor back to the start).
-Equivalently $\Phi = (1/p_0)\int (v/c)\,\mathrm{d}t$.
+Equivalently $\Phi = (1/p_0)\int (v/c)\\,\mathrm{d}t$.
 
 ### 5.3 First-order perturbation: the three amplitudes
 
@@ -562,9 +572,9 @@ A grid point differs from the truth by $(\delta x,\delta A_T,\delta\omega_b)$. T
 first order,
 
 $$
-\delta\Phi(t) \;=\;
+\delta\Phi(t) \\;=\\;
 \underbrace{\frac{\delta x}{p_0}}_{\textstyle \alpha}\sin\varphi
-\;+\;\frac{x}{p_0}\bigl(\delta A_T + t\,\delta\omega_b\bigr)\cos\varphi,
+\\;+\\;\frac{x}{p_0}\bigl(\delta A_T + t\\,\delta\omega_b\bigr)\cos\varphi,
 \qquad \varphi=\omega_b t + A_T .
 $$
 
@@ -572,15 +582,15 @@ The worst-case offsets are half a spacing, so the code defines the three
 amplitudes
 
 $$
-\alpha \;=\; \frac{D_x/2}{p_0},\qquad
-\beta \;=\; \frac{x_\text{lever}\,(D_{A_T}/2)}{p_0},\qquad
-\gamma \;=\; \frac{x_\text{lever}\,(D_{\omega}/2)\,T}{p_0},
+\alpha \\;=\\; \frac{D_x/2}{p_0},\qquad
+\beta \\;=\\; \frac{x_\text{lever}\\,(D_{A_T}/2)}{p_0},\qquad
+\gamma \\;=\\; \frac{x_\text{lever}\\,(D_{\omega}/2)\\,T}{p_0},
 $$
 
 and writes
 
 $$
-\delta\Phi(t) \;=\; \alpha\sin\varphi + \Bigl(\beta+\gamma\,\frac{t}{T}\Bigr)\cos\varphi .
+\delta\Phi(t) \\;=\\; \alpha\sin\varphi + \Bigl(\beta+\gamma\\,\frac{t}{T}\Bigr)\cos\varphi .
 $$
 
 Two points on the definitions:
@@ -594,7 +604,7 @@ Two points on the definitions:
 ### 5.4 The joint bound and the volume-optimal split
 
 At a fixed $t$ we must bound $|\alpha\sin\varphi + B\cos\varphi|$ over the unknown
-orbital phase $\varphi$, where $B=\beta+\gamma\,t/T$. The identity
+orbital phase $\varphi$, where $B=\beta+\gamma\\,t/T$. The identity
 
 $$
 \max_\varphi\bigl|\alpha\sin\varphi + B\cos\varphi\bigr| = \sqrt{\alpha^2+B^2}
@@ -610,22 +620,22 @@ $$
 Requiring this to be within the budget gives the **joint constraint**
 
 $$
-\boxed{\;\alpha^2 + (\beta+\gamma)^2 \;\le\; \varepsilon^2\;}.
+\boxed{\\;\alpha^2 + (\beta+\gamma)^2 \\;\le\\; \varepsilon^2\\;}.
 $$
 
 We now choose $\alpha,\beta,\gamma$ to maximise the cell **volume**
-$D_x\,D_{A_T}\,D_\omega$. Since each spacing is proportional to its amplitude
+$D_x\\,D_{A_T}\\,D_\omega$. Since each spacing is proportional to its amplitude
 ($D_x\propto\alpha$, $D_{A_T}\propto\beta$, $D_\omega\propto\gamma$), this is
 maximising $\alpha\beta\gamma$ subject to $\alpha^2+(\beta+\gamma)^2=\varepsilon^2$.
 
 1. For fixed $\alpha$ and fixed $s=\beta+\gamma$, the product
    $\beta\gamma$ is maximised when $\beta=\gamma=s/2$ (AM–GM).
-2. So maximise $\alpha\,(s/2)^2$ subject to $\alpha^2+s^2=\varepsilon^2$. Set
+2. So maximise $\alpha\\,(s/2)^2$ subject to $\alpha^2+s^2=\varepsilon^2$. Set
    $f=\alpha s^2$ and use a Lagrange multiplier:
    $$
    \frac{\partial f}{\partial\alpha}=s^2=2\lambda\alpha,\qquad
    \frac{\partial f}{\partial s}=2\alpha s=2\lambda s
-   \;\Longrightarrow\; \alpha=\lambda,\quad s=\alpha\sqrt2 .
+   \\;\Longrightarrow\\; \alpha=\lambda,\quad s=\alpha\sqrt2 .
    $$
    Then $\alpha^2+s^2 = 3\alpha^2=\varepsilon^2$.
 
@@ -634,7 +644,7 @@ Therefore
 $$
 \alpha_\text{bud} = \frac{\varepsilon}{\sqrt3},\qquad
 \beta_\text{bud}=\gamma_\text{bud}=\frac{\varepsilon}{\sqrt6}
-\quad(\text{code: \texttt{a\_bud}, \texttt{bc\_bud}}).
+\quad(\text{code: \texttt{a\\_bud}, \texttt{bc\\_bud}}).
 $$
 
 (The old per-axis split $\alpha=\beta=\gamma=\varepsilon/3$, which only satisfies
@@ -647,15 +657,15 @@ Inverting the amplitude definitions ($\delta = D/2$ at the worst corner) gives t
 spacings used in the code:
 
 $$
-D_x = 2\,\alpha_\text{bud}\,p_0,\qquad
-D_{A_T} = \frac{2\,\beta_\text{bud}\,p_0}{x_\text{lever}},\qquad
-D_\omega = \frac{2\,\gamma_\text{bud}\,p_0}{x_\text{lever}\,T}.
+D_x = 2\\,\alpha_\text{bud}\\,p_0,\qquad
+D_{A_T} = \frac{2\\,\beta_\text{bud}\\,p_0}{x_\text{lever}},\qquad
+D_\omega = \frac{2\\,\gamma_\text{bud}\\,p_0}{x_\text{lever}\\,T}.
 $$
 
 The axes (`derive_circular_grid`):
 
 * **x axis.** Over the kept orbits, $x\in[x_\text{min},x_\text{max}]$. The grid is
-  $\texttt{x} = x_\text{min} + D_x\cdot\{0,\dots,\lceil(x_\text{max}-x_\text{min})/D_x\rceil\}$,
+  $\texttt{x} = x_\text{min} + D_x\cdot\\{0,\dots,\lceil(x_\text{max}-x_\text{min})/D_x\rceil\\}$,
   padded to the next step above $x_\text{max}$ so every covered orbit is within
   $D_x/2$ of a grid point. The lever for the other axes is then
   $x_\text{lever}=x[-1]$ — the **top of the padded grid**, not $x_\text{max}$ —
@@ -663,7 +673,7 @@ The axes (`derive_circular_grid`):
 * **$\omega_b$ axis.** Uniform in $\omega_b=2\pi/p_{o,s}$ (not in $p_o$: the phase
   error is linear in $\delta\omega_b$, and it is $\omega_b$ that keeps the $\cos$
   lever constant), over
-  $[\omega_\text{lo},\omega_\text{hi}]=[2\pi/p_{o,\max},\,2\pi/p_{o,\min}]$ on the
+  $[\omega_\text{lo},\omega_\text{hi}]=[2\pi/p_{o,\max},\\,2\pi/p_{o,\min}]$ on the
   kept orbits, same padding.
 * **$A_T$ axis.** Uniform over $[0,2\pi)$ with
   $\lceil 2\pi/D_{A_T}\rceil$ points (no `+1`; the axis is periodic and wraps).
@@ -740,9 +750,9 @@ For each scanned `p_o`, `ajs_coverage_by_p_o` computes the **mean feasibility**
 over the `e = 0` records, pooled across the scanned `sin_i × omega_peri` combos:
 
 $$
-\text{cov}(p_o) \;=\;
-\frac{\#\{\text{e=0 segments at } p_o \text{ that pass the phase gate and the caps}\}}
-     {\#\{\text{e=0 segments at } p_o\}} .
+\text{cov}(p_o) \\;=\\;
+\frac{\\#\\{\text{e=0 segments at } p_o \text{ that pass the phase gate and the caps}\\}}
+     {\\#\\{\text{e=0 segments at } p_o\\}} .
 $$
 
 This is measured **before** `-drop_pct`: the drop is a cost knob, and the break
@@ -757,9 +767,9 @@ ascending, let `bad` be the ladder points with `cov < -break_coverage/100`. Then
 $$
 p_\text{break} =
 \begin{cases}
-p_{\text{ladder}[0]}, & \text{no } p_o \text{ is bad (all ajs)}, \\[3pt]
-p_{\text{ladder}[i_\text{bad}+1]}, & i_\text{bad} = \text{index of the last bad } p_o, \\[3pt]
-p_{\max}\,(1+10^{-9}), & \text{the longest } p_o \text{ is still bad (all circular).}
+p_{\text{ladder}[0]}, & \text{no } p_o \text{ is bad (all ajs)}, \cr
+p_{\text{ladder}[i_\text{bad}+1]}, & i_\text{bad} = \text{index of the last bad } p_o, \cr
+p_{\max}\\,(1+10^{-9}), & \text{the longest } p_o \text{ is still bad (all circular).}
 \end{cases}
 $$
 
