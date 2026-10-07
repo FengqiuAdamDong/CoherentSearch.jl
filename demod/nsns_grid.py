@@ -465,9 +465,80 @@ def claimed_fraction_plot(recs, args, out_path):
     plt.close(fig)
 
 
-# NS-NS default orbital-period ladder: 30 minutes out to 10 days, in years.
-_NSNS_PO_MIN_D = 30.0 / 1440.0
-_NSNS_PO_MAX_D = 10.0
+def orbit_phase_param_plots(groups, args, model_lbl, plot_dir):
+    """One figure per (p_o, sin_i, e, omega_peri) orbit: the worst phase offset
+    (integrated phase error [cycles], the phase-connection analogue of the
+    reference's model-truth bin error) and the best-fit accel/jerk/snap, both vs
+    segment start orbital phase.  Kept/dropped/infeasible start phases are marked
+    as in the feasibility plots; the phase panel carries the -phase_tol_cycles
+    budget line.  One plot per orbit combination -- the reference gates this
+    behind -plot_orbits because large grids are slow, but here the records are
+    already scanned."""
+    cyc_per_m = 1.0 / (C * args.p0)
+    print(f"\nWriting {len(groups)} per-orbit phase/parameter plots to "
+          f"{plot_dir}/ ...")
+    for (p_o, sin_i, e, omega_peri), grp in groups.items():
+        p_o_s = grp[0]["p_o_s"]
+        ph = np.array([r["t0"] / p_o_s for r in grp])
+        cyc = np.array([r["trunc_phase"] for r in grp]) * cyc_per_m
+        keep = np.array([r["kept"] for r in grp])
+        dropped = np.array([r["feasible"] and not r["kept"] for r in grp])
+        infeas = np.array([not r["feasible"] for r in grp])
+        ajs = {n: np.array([r[k] for r in grp])
+               for n, k in (("accel", "a"), ("jerk", "j"), ("snap", "s"))}
+        styles = ((keep, ".", 6, "C0", "claimed"),
+                  (dropped, "s", 4, "C1", f"dropped (-drop_pct {args.drop_pct:g}%)"),
+                  (infeas, "x", 5, "C3", "infeasible (over budget)"))
+
+        fig, axes = plt.subplots(1, 4, figsize=(21, 4.4))
+
+        # Panel 0: this orbit's integrated phase error vs segment start phase.
+        ax = axes[0]
+        for sel, mk, ms, col, lbl in styles:
+            if sel.any():
+                ax.plot(ph[sel], cyc[sel], mk, ms=ms, color=col, label=lbl)
+        ax.axhline(args.phase_tol_cycles, color="k", ls="--", lw=1,
+                   label=f"{args.phase_tol_cycles:g}-cycle budget")
+        # infeasible overshoot orders of magnitude: log scale keeps the budget
+        # line readable
+        if cyc.max() > 5.0 * args.phase_tol_cycles and cyc.min() > 0:
+            ax.set_yscale("log")
+        ax.set_xlim(0, 1)
+        ax.set_xlabel("Segment start orbital phase")
+        ax.set_ylabel("Integrated phase error [cycles]")
+        ax.set_title("Worst phase offset\n(cubic truncation vs truth)")
+        ax.legend(fontsize=8)
+
+        # Panels 1-3: best-fit accel/jerk/snap vs segment start phase.
+        for ax, name in zip(axes[1:], AXIS_NAMES):
+            unit = AXIS_UNITS[AXIS_NAMES.index(name)]
+            for sel, mk, ms, col, lbl in styles:
+                if sel.any():
+                    ax.plot(ph[sel], ajs[name][sel], mk, ms=ms, color=col,
+                            label=lbl)
+            ax.set_xlim(0, 1)
+            ax.set_xlabel("Segment start orbital phase")
+            ax.set_ylabel(f"{name} [{unit}]")
+            ax.set_title(f"Best-fit {name}")
+            ax.legend(fontsize=8)
+
+        fig.suptitle(
+            f"Orbit: p_o={p_o:g} yr, e={e:g}, sin_i={sin_i:g}, "
+            f"omega_peri={omega_peri:.3f} rad  |  p0={args.p0} s, "
+            f"model=v0+{model_lbl}, anchor={args.anchor}, "
+            f"GR={'on' if args.gr else 'off'}, T={args.t_obs:g} s",
+            fontsize=11)
+        fig.tight_layout(rect=(0, 0, 1, 0.95))
+        fname = (f"orbit_phase_po{p_o:g}_sini{sin_i:g}_e{e:g}"
+                 f"_w{omega_peri:.2f}_{model_lbl.replace('+', '')}.png")
+        fig.savefig(os.path.join(plot_dir, fname), dpi=130)
+        plt.close(fig)
+    print(f"Done: {len(groups)} phase/parameter plots in {plot_dir}/")
+
+
+# NS-NS default orbital-period ladder: 2 minutes out to 24 hours, in years.
+_NSNS_PO_MIN_D = 2.0 / 1440.0
+_NSNS_PO_MAX_D = 1.0
 _DEFAULT_PO = list(np.geomspace(_NSNS_PO_MIN_D, _NSNS_PO_MAX_D, 12) / 365.25)
 
 
@@ -489,7 +560,7 @@ def build_parser():
     ap.add_argument("-p_o", type=float, nargs="+", default=_DEFAULT_PO,
                     help="Orbital periods to scan [yr]; worst case over all of "
                          "them is used. Default is 12 log-spaced points from "
-                         "30 min to 10 d (NS-NS range)")
+                         "2 min to 24 h (NS-NS range)")
     ap.add_argument("-e", type=float, nargs="+",
                     default=[0.0, 0.1, 0.3, 0.5, 0.7, 0.9],
                     help="Eccentricities to scan; worst case over all of them "
@@ -556,6 +627,31 @@ def build_parser():
                     help="Time samples per span for the fits")
     ap.add_argument("-n_mc", type=int, default=300,
                     help="Monte Carlo mismatch draws for validation")
+    ap.add_argument("-mode", choices=("ajs", "circular", "hybrid"),
+                    default="ajs",
+                    help="Grid model. 'ajs' (default): the accel/jerk/snap "
+                         "phase-connection grid. 'circular': pure Keplerian "
+                         "circular-orbit grid (pb,x,at), no cubic-truncation "
+                         "gate -- the demod is exact at the truth, so the grid "
+                         "is the pure parameter-mismatch phase budget, uniform "
+                         "in (omega_b, x, A_T). 'hybrid': circular below "
+                         "-p_break and ajs at/above it, combining the exact "
+                         "short-orbit circular search with the general cubic "
+                         "search for long orbits; emits two CSVs, one per model")
+    ap.add_argument("-p_break", type=float, default=None,
+                    help="hybrid only: orbital period [yr] at which to switch "
+                         "from the circular grid (below) to the ajs grid "
+                         "(at/above). Default: derived from -break_coverage as "
+                         "the shortest scanned p_o such that every p_o at/above "
+                         "it has mean e=0 ajs coverage >= -break_coverage (ajs "
+                         "coverage dips near p_o ~ T_obs, so the switch clears "
+                         "the whole inadequate band)")
+    ap.add_argument("-break_coverage", type=float, default=60.0,
+                    help="hybrid only: the ajs coverage [%%] used to place the "
+                         "automatic p_break. Coverage is the mean over the "
+                         "scanned e=0 sin_i x omega_peri combos of the fraction "
+                         "of segment start phases that pass the phase gate and "
+                         "caps (before -drop_pct). Ignored if -p_break is given")
     ap.add_argument("-outdir", type=str,
                     default=os.path.dirname(os.path.abspath(__file__)),
                     help="Base output directory")
@@ -564,6 +660,10 @@ def build_parser():
     ap.add_argument("-plot_subdir", type=str, default="grid_size_plots",
                     help="Subdirectory of -outdir for plots (created if "
                          "missing), to avoid cluttering the cwd")
+    ap.add_argument("-plot", action="store_true",
+                    help="Also write the one-figure-per-orbit phase-error and "
+                         "best-fit accel/jerk/snap plots. Off by default: one "
+                         "figure per orbit combination is slow for large grids")
     return ap
 
 
@@ -583,27 +683,296 @@ def grids_from_spec(spec):
     return grids
 
 
-def write_grid_outputs(args, spec):
-    """Write the machine-readable grid: YAML spec + CSV of every concrete
-    (accel, jerk, snap) trial."""
-    os.makedirs(args.outdir, exist_ok=True)
-    yaml_path = os.path.join(args.outdir, f"{args.outstem}.yaml")
-    csv_path = os.path.join(args.outdir, f"{args.outstem}.csv")
-    with open(yaml_path, "w") as fh:
-        yaml.safe_dump(spec, fh, default_flow_style=False, sort_keys=False)
-
+def write_grid_csv(csv_path, spec):
+    """CSV of every concrete (accel, jerk, snap) trial.  Returns the total."""
     grids = grids_from_spec(spec)
     n_tot = int(np.prod([len(g) for g in grids]))
     with open(csv_path, "w", newline="") as fh:
-        w = csv.writer(fh)
+        # LF, not csv.writer's default CRLF: the demod sweep builds each output
+        # filename from these literal fields in bash, where a trailing \r would
+        # ride along and break the match against the file Julia writes.
+        w = csv.writer(fh, lineterminator="\n")
         w.writerow(["accel", "jerk", "snap"])
         for a in grids[0]:
             for j in grids[1]:
                 for s in grids[2]:
                     w.writerow([f"{a:.10g}", f"{j:.10g}", f"{s:.10g}"])
-    print(f"\nWrote grid spec -> {yaml_path}")
+    return n_tot
+
+
+_SKIP = object()  # sentinel: "do not write this file" (None means "use default")
+
+
+def write_grid_outputs(args, spec, csv_path=None, yaml_path=None):
+    """Write the machine-readable grid: CSV of every concrete (a,j,s) trial
+    plus the YAML spec.  Paths default to <outdir>/<outstem>.{csv,yaml}; hybrid
+    passes an explicit per-model CSV path and yaml_path=_SKIP so only the
+    combined YAML is written."""
+    os.makedirs(args.outdir, exist_ok=True)
+    if csv_path is None:
+        csv_path = os.path.join(args.outdir, f"{args.outstem}.csv")
+    if yaml_path is None:
+        yaml_path = os.path.join(args.outdir, f"{args.outstem}.yaml")
+    if yaml_path is not _SKIP:
+        with open(yaml_path, "w") as fh:
+            yaml.safe_dump(spec, fh, default_flow_style=False, sort_keys=False)
+    n_tot = write_grid_csv(csv_path, spec)
+    print(f"\nWrote {n_tot} trial(s) -> {csv_path}")
+    if yaml_path is not _SKIP:
+        print(f"Wrote grid spec -> {yaml_path}")
+    return yaml_path, csv_path
+
+
+# ---------------------------------------------------------------------------
+# Circular-orbit mode
+#
+# The circular demod removes the exact non-polynomial Roemer track, so it is
+# exact at the true parameters and there is NO cubic-truncation feasibility
+# gate (every point is "feasible").  The only residual at a grid point is the
+# parameter mismatch, and the grid is uniform in the coordinates that make up
+# the LOS velocity V/c = omega_b*x*cos(omega_b*t + A_T), x = a_p sin(i)/c:
+#
+#     delta_v/c = (domega_b) x cos - (dA_T) x sin + (dx) omega_b cos
+#
+# The demod's coherent observable is the orbit-induced residual of the SPIN
+# phase (the phase the fold accumulates), Phi(t) = (1/p0) int V/c dt
+#     = (x/p0) sin(omega_b t + A_T)   [cycles, up to a tau-independent offset],
+# where M = omega_b t + A_T is the orbital phase (mean anomaly) and V/c is the
+# LOS Doppler.  A grid offset perturbs it by
+#     dPhi(t) = a sin(phi) + (b + c*(2t/T)) cos(phi),   phi = omega_b t + A_T,
+# with a, b, c the x, A_T and omega contributions (see derive_circular_grid).
+# The JOINT bound is a^2 + (b+c)^2 <= phase_tol^2, whose volume-optimal split is
+# a = phase_tol/sqrt(3), b = c = phase_tol/sqrt(6) -- NOT the per-axis
+# phase_tol/3 split (that only satisfies the triangle inequality and wastes
+# ~2.6x).  Note omega_b (not P_b) is the uniform coordinate, and x (not sin i)
+# decouples the amplitude from the period (a_p ~ P_b^(2/3)).
+# ---------------------------------------------------------------------------
+
+def circular_x_lt_s(p_o_s, sin_i, companion_mass, pulsar_mass):
+    """x = a_p sin(i)/c [light-seconds] for a two-body Keplerian orbit."""
+    return semi_major_axis_sini(p_o_s, sin_i, companion_mass, pulsar_mass) / C
+
+
+def apply_drop_circular(orbits, drop_pct):
+    """Drop the worst-drop_pct% of the (p_o, sin_i) orbits before the grid
+    ranges/spacings are derived.  There is no cubic-truncation gate here (the
+    circular demod is exact at the truth), so 'worst' = most expensive: rank by
+    x = a_p sin(i)/c, which monotonically sets every grid lever (lever_w ~ x)
+    and hence the per-orbit template cost.  Keeps the cheapest (1 - drop_pct)%.
+    Mirrors apply_drop's structure (globally worst first, >= 1 survives)."""
+    order = sorted(orbits, key=lambda o: o["x"])  # cheapest (smallest x) first
+    n_keep = max(int(round(len(order) * (1.0 - drop_pct / 100.0))), 1)
+    return order[:n_keep]
+
+
+def derive_circular_grid(args, p_o_values=None):
+    """Phase-budget circular grid.  Returns (spec, omega_b, x, A_T, orbits)
+    where `orbits` carries the per-(p_o, sin_i) kept flag for the coverage plot.
+
+    Unlike the ajs branch there is no per-segment phase-fit gate: the exact
+    circular demod leaves only parameter-mismatch, so every orbit is
+    'feasible' and -drop_pct is the sole cost control, dropping the highest-x
+    (most expensive) orbits first.  `p_o_values` restricts the period ladder
+    (hybrid uses it for the below-p_break side); None = args.p_o."""
+    p_o_values = args.p_o if p_o_values is None else p_o_values
+    orbits = [dict(p_o_s=p * YEAR_S, sin_i=s,
+                   x=circular_x_lt_s(p * YEAR_S, s, args.companion_mass,
+                                     args.pulsar_mass))
+              for p in p_o_values for s in args.sin_i]
+    n_pre = len(orbits)
+    kept = apply_drop_circular(orbits, args.drop_pct)
+    kept_set = {id(o) for o in kept}
+    for o in orbits:
+        o["kept"] = id(o) in kept_set
+
+    p_o_min_s = min(o["p_o_s"] for o in kept)
+    p_o_max_s = max(o["p_o_s"] for o in kept)
+    x_min = min(o["x"] for o in kept)
+    x_max = max(o["x"] for o in kept)
+
+    # omega_b = 2 pi / p_o is the uniform coordinate; convert to p_o (days) for
+    # the CSV so the demod (which takes -pb in days) is driven directly.
+    omega_b_lo = 2 * np.pi / p_o_max_s
+    omega_b_hi = 2 * np.pi / p_o_min_s
+
+    phase_tol = args.phase_tol_cycles
+    T = args.t_obs
+    p0 = args.p0
+
+    # Joint phase budget.  A grid offset perturbs the residual spin phase
+    #     Phi(t) = (x/p0) sin(phi),   phi = omega_b t + A_T,   t in [0, T],
+    # by (to first order in the offset)
+    #     dPhi(t) = a sin(phi) + (b + c*(t/T)) cos(phi),
+    # with contribution amplitudes (offsets <= half the spacing)
+    #     a = (d_x/2)/p0,   b = x_max (d_AT/2)/p0,   c = x_max (d_omega/2) T/p0.
+    # Here t is the ABSOLUTE time since the observation start, because A_T is
+    # anchored there (demod_dat.jl maps the midpoint anchor back to the start);
+    # so the omega axis sweeps the full [0, T] and its lever is T, NOT T/2.
+    # At fixed t the sup over the phase is sqrt(a^2 + (b + c t/T)^2), worst at
+    # t = T, so the exact bound is
+    #     a^2 + (b + c)^2 <= phase_tol^2.
+    # Maximising the cell volume a*b*c under that gives
+    #     a = phase_tol/sqrt(3),   b = c = phase_tol/sqrt(6),
+    # i.e. b = c.  The old code used the triangle-inequality split
+    # a = b = c = phase_tol/3 with a T/2 omega lever, which is both needlessly
+    # tight (a*b*c is 2.6x smaller) and, measured against the true bound here,
+    # an overstep.  test_circular_grid.py Monte-Carlos the exact residual AND
+    # checks the adversarial cell corner over the covered ranges.
+    a_bud = phase_tol / np.sqrt(3.0)    # x-axis contribution
+    bc_bud = phase_tol / np.sqrt(6.0)   # A_T and omega contributions (equal)
+
+    d_x = 2.0 * a_bud * p0
+    x = x_min + d_x * np.arange(int(np.ceil((x_max - x_min) / d_x)) + 1)
+    # The x grid is padded to the next step above x_max so every covered orbit
+    # has a point within d_x/2.  The A_T and omega levers are proportional to x,
+    # and a covered orbit at x_max can snap to that top (padded) point, so the
+    # levers must be sized at the grid top x[-1], NOT at x_max -- otherwise the
+    # top cell overshoots by O((x[-1]/x_max)^2).
+    x_lever = x[-1]
+    d_AT = 2.0 * bc_bud * p0 / x_lever
+    d_omega = 2.0 * bc_bud * p0 / (x_lever * T)
+
+    omega_b = omega_b_lo + d_omega * np.arange(
+        int(np.ceil((omega_b_hi - omega_b_lo) / d_omega)) + 1)
+    A_T = 0.0 + d_AT * np.arange(int(np.ceil(2 * np.pi / d_AT)))
+
+    spec = {
+        "mode": "circular",
+        "inf": os.path.abspath(args.inf) if args.inf else None,
+        "p0": float(p0),
+        "t_obs": float(T),
+        "phase_tol_cycles": float(phase_tol),
+        "drop_pct": float(args.drop_pct),
+        "companion_mass": float(args.companion_mass),
+        "pulsar_mass": float(args.pulsar_mass),
+        "p_o_yr": [float(v) for v in p_o_values],
+        "sin_i": [float(v) for v in args.sin_i],
+        "n_orbits": n_pre,
+        "n_kept": len(kept),
+        "ranges": [["omega_b", float(omega_b_lo), float(omega_b_hi)],
+                   ["x", float(x_min), float(x_max)],
+                   ["A_T", 0.0, 2 * np.pi]],
+        "spacings": [float(d_omega), float(d_x), float(d_AT)],
+        "n_omega_b": int(len(omega_b)),
+        "n_x": int(len(x)),
+        "n_A_T": int(len(A_T)),
+        "n_trials": int(len(omega_b) * len(x) * len(A_T)),
+    }
+    return spec, omega_b, x, A_T, orbits
+
+
+def circular_corner_plot(orbits, args, out_path):
+    """Circular-grid analogue of corner_feasible_fraction: which (p_o, sin_i)
+    orbits survive -drop_pct.  There is no feasibility gate here (the exact
+    circular demod removes the whole Roemer track, so every orbit would be
+    'feasible'); 'kept' is purely the cost drop, highest-x first.  Left: the 2D
+    kept map over the orbit box.  Right: 1D marginals (kept% vs p_o and vs
+    sin_i), the cost of a period/sin_i row after averaging the other axis."""
+    p_o_vals = sorted({o["p_o_s"] for o in orbits})
+    sini_vals = sorted({o["sin_i"] for o in orbits})
+    idx_po = {v: i for i, v in enumerate(p_o_vals)}
+    idx_si = {v: j for j, v in enumerate(sini_vals)}
+    kept = np.full((len(p_o_vals), len(sini_vals)), np.nan)
+    for o in orbits:
+        kept[idx_po[o["p_o_s"]], idx_si[o["sin_i"]]] = 100.0 * bool(o["kept"])
+    days = np.array(p_o_vals) / 86400.0
+    overall = 100.0 * np.mean([bool(o["kept"]) for o in orbits])
+
+    fig, axes = plt.subplots(1, 3, figsize=(15.5, 5.0))
+    im = axes[0].imshow(kept.T, origin="lower", aspect="auto", vmin=0, vmax=100,
+                        cmap="viridis")
+    axes[0].set_xticks(range(len(p_o_vals)))
+    axes[0].set_xticklabels([f"{d:.3g}" for d in days], rotation=45, fontsize=8)
+    axes[0].set_yticks(range(len(sini_vals)))
+    axes[0].set_yticklabels([f"{s:g}" for s in sini_vals], fontsize=8)
+    axes[0].set_xlabel("Orbital period $p_o$ [days]")
+    axes[0].set_ylabel("sin(i)")
+    axes[0].set_title("Orbit kept after -drop_pct (%)")
+    fig.colorbar(im, ax=axes[0], label="% kept")
+
+    for ax, vals, labels, xlabel, marginal in (
+            (axes[1], days, None, "Orbital period $p_o$ [days]", np.nanmean(kept, axis=1)),
+            (axes[2], sini_vals, [f"{s:g}" for s in sini_vals], "sin(i)", np.nanmean(kept, axis=0))):
+        x = np.arange(len(vals))
+        ax.bar(x, marginal, color="C0")
+        ax.axhline(overall, color="k", ls="--", lw=1,
+                   label=f"overall kept = {overall:.1f}%")
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels if labels is not None
+                           else [f"{v:.3g}" for v in vals], rotation=45, fontsize=8)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("% kept (marginal)")
+        ax.set_ylim(0, 100)
+        ax.legend(fontsize=8)
+
+    fig.suptitle(
+        f"Circular-orbit grid coverage (T = {args.t_obs:g} s, "
+        f"{args.phase_tol_cycles:g}-cycle budget, drop_pct={args.drop_pct:g}%, "
+        f"kept {sum(bool(o['kept']) for o in orbits)}/{len(orbits)} orbits)",
+        fontsize=11)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    fig.savefig(out_path, dpi=140)
+    plt.close(fig)
+
+
+def write_circular_csv(csv_path, omega_b, x, A_T):
+    """CSV (pb,x,at) of every concrete circular trial.  pb in days, x in
+    light-seconds, at the mean anomaly [rad] at the .inf epoch (the
+    pulsegen_gr.py -anchor start convention; demod_dat.jl's default)."""
+    pb_days = 2 * np.pi / omega_b / 86400.0
+    n_tot = int(len(omega_b) * len(x) * len(A_T))
+    with open(csv_path, "w", newline="") as fh:
+        w = csv.writer(fh, lineterminator="\n")
+        w.writerow(["pb", "x", "at"])
+        for pbd in pb_days:
+            for xv in x:
+                for at in A_T:
+                    w.writerow([f"{pbd:.10g}", f"{xv:.10g}", f"{at:.10g}"])
+    return n_tot
+
+
+def write_circular_outputs(args, spec, omega_b, x, A_T):
+    """YAML spec + CSV (pb,x,at) of every concrete circular trial.  Paths
+    default to <outdir>/<outstem>.{yaml,csv}; hybrid passes explicit paths."""
+    os.makedirs(args.outdir, exist_ok=True)
+    yaml_path = os.path.join(args.outdir, f"{args.outstem}.yaml")
+    csv_path = os.path.join(args.outdir, f"{args.outstem}.csv")
+    with open(yaml_path, "w") as fh:
+        yaml.safe_dump(spec, fh, default_flow_style=False, sort_keys=False)
+    n_tot = write_circular_csv(csv_path, omega_b, x, A_T)
+    print(f"\nWrote circular grid spec -> {yaml_path}")
     print(f"Wrote {n_tot} trial(s) -> {csv_path}")
     return yaml_path, csv_path
+
+
+def main_circular(args):
+    """Circular-orbit grid derivation (no cubic-truncation gate: the demod is
+    exact at the truth)."""
+    spec, omega_b, x, A_T, orbits = derive_circular_grid(args)
+    pb_lo_d = float(2 * np.pi / omega_b[-1] / 86400.0)
+    pb_hi_d = float(2 * np.pi / omega_b[0] / 86400.0)
+    print(f"Circular-orbit grid: p_o = {pb_lo_d:.4g}-{pb_hi_d:.4g} d "
+          f"({len(omega_b)} periods, uniform in omega_b), "
+          f"x = {spec['ranges'][1][1]:.4g}-{spec['ranges'][1][2]:.4g} lt-s "
+          f"({len(x)}), A_T = 0-2pi ({len(A_T)}), "
+          f"mass = {args.pulsar_mass:g}+{args.companion_mass:g} Msun")
+    print(f"Orbits: kept {spec['n_kept']}/{spec['n_orbits']} "
+          f"(-drop_pct {args.drop_pct:g}%, highest-x dropped first)")
+    print(f"T = {args.t_obs:.6g} s, p0 = {args.p0} s, "
+          f"joint phase budget {args.phase_tol_cycles:g} cyc "
+          f"(a^2+(b+c)^2 <= tol^2; a={args.phase_tol_cycles/np.sqrt(3):.4g}, "
+          f"b=c={args.phase_tol_cycles/np.sqrt(6):.4g})")
+    print(f"Spacings: d(omega_b) = {spec['spacings'][0]:.4e} rad/s, "
+          f"d(x) = {spec['spacings'][1]:.4e} lt-s, "
+          f"d(A_T) = {spec['spacings'][2]:.4e} rad")
+    print(f"Total templates: {spec['n_trials']:.3e}")
+    write_circular_outputs(args, spec, omega_b, x, A_T)
+
+    plot_dir = os.path.join(args.outdir, args.plot_subdir)
+    os.makedirs(plot_dir, exist_ok=True)
+    cover_path = os.path.join(plot_dir, "circular_coverage.png")
+    circular_corner_plot(orbits, args, cover_path)
+    print(f"Saved circular-orbit coverage plot to {cover_path}")
 
 
 def apply_caps(recs, caps):
@@ -618,70 +987,15 @@ def apply_caps(recs, caps):
     return [r for r in recs if r["feasible"]]
 
 
-def main():
-    ap = build_parser()
-    args = ap.parse_args()
-
-    if not 0.0 <= args.drop_pct < 100.0:
-        ap.error("-drop_pct must be in [0, 100)")
-
-    # Observation length from the .inf unless overridden.
-    inf_N = inf_dt = None
-    if args.inf is not None:
-        inf_N, inf_dt, _epoch = read_inf(args.inf)
-        if args.t_obs is None:
-            args.t_obs = inf_N * inf_dt
-    if args.t_obs is None:
-        ap.error("give -inf, or set -t_obs explicitly")
-
-    args.term_mask = terms_mask(args.terms)
-    model_lbl = terms_label(args.term_mask)
-
+def ajs_grid_from_scan(args, recs, caps, model_lbl, do_plots=True,
+                       csv_path=None, yaml_path=None, plot_stem=""):
+    """Gate / cap / drop / range / allocate / validate a set of scanned ajs
+    records and write the grid.  `recs` is the exact subset to grid (hybrid
+    passes only p_o >= p_break).  Flags (feasible/kept) are recomputed here.
+    Returns the spec, or None if the subset is infeasible."""
     span_s = args.t_obs
-    n_orbits = (len(args.p_o) * len(args.sin_i) * len(args.e)
-                * len(args.omega_peri))
     phase_tol_m = args.phase_tol_cycles * C * args.p0
 
-    # Natural NS-NS caps: the peak kinematics of the shortest orbit in the
-    # scan (over all scanned sin_i), just covering the tightest binary asked
-    # for.  A user cap tightens them.
-    p_min_s = min(args.p_o) * YEAR_S
-    a_pk, j_pk, s_pk = peak_kinematics(
-        p_min_s, max(args.e), max(args.sin_i),
-        args.companion_mass, args.pulsar_mass)
-    caps = [
-        args.max_accel if args.max_accel is not None else a_pk,
-        args.max_jerk if args.max_jerk is not None else j_pk,
-        args.max_snap if args.max_snap is not None else s_pk,
-    ]
-
-    def rng(vals):
-        return (f"{min(vals):g}" if len(vals) == 1
-                else f"{min(vals):g}-{max(vals):g} ({len(vals)})")
-
-    print(f"Orbit grid ({n_orbits} orbits): p_o = {rng(args.p_o)} yr, "
-          f"e = {rng(args.e)}, sin_i = {rng(args.sin_i)}, "
-          f"omega_peri = {rng(args.omega_peri)} rad, "
-          f"mass = {args.pulsar_mass:g}+{args.companion_mass:g} Msun, "
-          f"GR = {'on' if args.gr else 'off'}")
-    if inf_N is not None:
-        print(f"Observation: {args.inf} (N = {inf_N}, dt = {inf_dt:g} s)")
-    print(f"T = {args.t_obs:.6g} s ({args.t_obs / 86400.0:.6g} d), "
-          f"p0 = {args.p0} s")
-    print(f"Model terms: v0 + {model_lbl} "
-          f"({sum(args.term_mask)} gridded axis/axes)")
-    print(f"Caps: |accel| <= {caps[0]:.4g} m/s^2, |jerk| <= {caps[1]:.4g} m/s^3, "
-          f"|snap| <= {caps[2]:.4g} m/s^4")
-    print(f"Phase budget: {args.phase_tol_cycles:g} cycles "
-          f"({phase_tol_m:.4g} m integrated) over the observation "
-          f"(anchor: {args.anchor})")
-    print(f"Marginal-segment trade: -drop_pct {args.drop_pct:g}% of the feasible "
-          f"segments discarded (worst phase error first), pooled over all orbits")
-    print()
-
-    # ---- Stage 1: scan orbit grid x phase; phase gate + -drop_pct + caps ----
-    recs = scan_segments(span_s, args, args.p_o, args.sin_i, args.e,
-                         args.omega_peri, args.n_phase, args.nsamp)
     mark_feasible(recs, phase_tol_m)
     n_feasible_pre = sum(1 for r in recs if r["feasible"])
     feasible = apply_caps(recs, caps)
@@ -698,7 +1012,8 @@ def main():
         f_e = [r for r in sub if r["feasible"]]
         wk = (f"{max(r['trunc_phase'] for r in k_e) / (C * args.p0):.4f}"
               if k_e else "-")
-        wt = max(r["trunc_phase"] for r in sub) / (C * args.p0)
+        wt = (max(r["trunc_phase"] for r in sub) / (C * args.p0)
+              if sub else 0.0)
         print(f"{e:>5.2f} {len(k_e):>5d}/{len(sub):<6d} {len(f_e):>5d}/{len(sub):<6d} "
               f"{wk:>18} {wt:>19.4f}")
 
@@ -713,7 +1028,7 @@ def main():
               f"T = {args.t_obs:.6g} s, so there is no grid to report: the "
               f"cubic truncation is irreducible.  Add terms to -terms or raise "
               f"-phase_tol_cycles.")
-        return
+        return None
 
     kept = apply_drop(feasible, args.drop_pct)
     per_orbit = defaultdict(lambda: [0, 0])
@@ -749,7 +1064,7 @@ def main():
     if alloc is None:
         print("INFEASIBLE after accounting for saturated axes; raise "
               "-phase_tol_cycles or add -terms.")
-        return
+        return None
     spacings, eps_arr, active = alloc
 
     print(f"Phase budget for the grid: {budget_m / (C * args.p0):.4f} cycles "
@@ -811,7 +1126,8 @@ def main():
         "companion_mass": float(args.companion_mass),
         "pulsar_mass": float(args.pulsar_mass),
         "gr": bool(args.gr),
-        "p_o_yr": [float(x) for x in args.p_o],
+        # the periods this sub-grid actually covers (hybrid filters the ladder)
+        "p_o_yr": [float(x) for x in sorted({r["p_o"] for r in recs})],
         "e": [float(x) for x in args.e],
         "sin_i": [float(x) for x in args.sin_i],
         "omega_peri": [float(x) for x in args.omega_peri],
@@ -829,20 +1145,294 @@ def main():
         "eps": [float(x) for x in eps_arr],
         "active": [bool(x) for x in active],
     }
-    write_grid_outputs(args, spec)
+    write_grid_outputs(args, spec, csv_path=csv_path, yaml_path=yaml_path)
 
-    groups = defaultdict(list)
-    for r in recs:
-        groups[(r["p_o"], r["sin_i"], r["e"], r["omega_peri"])].append(r)
-    plot_dir = os.path.join(args.outdir, args.plot_subdir)
+    if do_plots:
+        groups = defaultdict(list)
+        for r in recs:
+            groups[(r["p_o"], r["sin_i"], r["e"], r["omega_peri"])].append(r)
+        plot_dir = os.path.join(args.outdir, args.plot_subdir)
+        os.makedirs(plot_dir, exist_ok=True)
+        corner_path = os.path.join(plot_dir,
+                                   f"{plot_stem}corner_feasible_fraction.png")
+        corner_feasible_fraction(groups, args, corner_path)
+        print(f"Saved corner plot of % orbit kept to {corner_path}")
+
+        cover_path = os.path.join(plot_dir, f"{plot_stem}claimed_fraction.png")
+        claimed_fraction_plot(recs, args, cover_path)
+        print(f"Saved % phase claimed vs p_o to {cover_path}")
+
+        if args.plot:
+            orbit_phase_param_plots(groups, args, model_lbl, plot_dir)
+    return spec
+
+
+def _natural_caps(args, p_min_yr):
+    """Default NS-NS caps from the peak kinematics of the orbit at p_min_yr
+    [yr] (largest scanned e and sin_i), unless the user capped an axis."""
+    p_min_s = p_min_yr * YEAR_S
+    a_pk, j_pk, s_pk = peak_kinematics(
+        p_min_s, max(args.e), max(args.sin_i),
+        args.companion_mass, args.pulsar_mass)
+    return [
+        args.max_accel if args.max_accel is not None else a_pk,
+        args.max_jerk if args.max_jerk is not None else j_pk,
+        args.max_snap if args.max_snap is not None else s_pk,
+    ]
+
+
+def ajs_coverage_by_p_o(recs, args, caps, phase_tol_m):
+    """Mean ajs feasibility (phase gate + caps, BEFORE -drop_pct) over the e=0
+    records at each p_o, pooled over the scanned sin_i x omega_peri combos (each
+    combo has the same n_phase, so this is also the combo mean).  Returns
+    (coverage_dict, used_all_e); used_all_e is True when no e=0 records exist and
+    the fallback pooled over every e."""
+    mark_feasible(recs, phase_tol_m)
+    apply_caps(recs, caps)
+    e0 = [r for r in recs if r["e"] == 0.0]
+    used_all_e = not e0
+    pool = recs if used_all_e else e0
+    tot = defaultdict(int)
+    feas = defaultdict(int)
+    for r in pool:
+        tot[r["p_o"]] += 1
+        feas[r["p_o"]] += int(r["feasible"])
+    return {p: feas[p] / tot[p] for p in tot}, used_all_e
+
+
+def main_ajs(args, inf_N, inf_dt):
+    """The pure accel/jerk/snap grid (the original -mode ajs path)."""
+    args.term_mask = terms_mask(args.terms)
+    model_lbl = terms_label(args.term_mask)
+    n_orbits = (len(args.p_o) * len(args.sin_i) * len(args.e)
+                * len(args.omega_peri))
+    phase_tol_m = args.phase_tol_cycles * C * args.p0
+    caps = _natural_caps(args, min(args.p_o))
+
+    def rng(vals):
+        return (f"{min(vals):g}" if len(vals) == 1
+                else f"{min(vals):g}-{max(vals):g} ({len(vals)})")
+
+    print(f"Orbit grid ({n_orbits} orbits): p_o = {rng(args.p_o)} yr, "
+          f"e = {rng(args.e)}, sin_i = {rng(args.sin_i)}, "
+          f"omega_peri = {rng(args.omega_peri)} rad, "
+          f"mass = {args.pulsar_mass:g}+{args.companion_mass:g} Msun, "
+          f"GR = {'on' if args.gr else 'off'}")
+    if inf_N is not None:
+        print(f"Observation: {args.inf} (N = {inf_N}, dt = {inf_dt:g} s)")
+    print(f"T = {args.t_obs:.6g} s ({args.t_obs / 86400.0:.6g} d), "
+          f"p0 = {args.p0} s")
+    print(f"Model terms: v0 + {model_lbl} "
+          f"({sum(args.term_mask)} gridded axis/axes)")
+    print(f"Caps: |accel| <= {caps[0]:.4g} m/s^2, |jerk| <= {caps[1]:.4g} m/s^3, "
+          f"|snap| <= {caps[2]:.4g} m/s^4")
+    print(f"Phase budget: {args.phase_tol_cycles:g} cycles "
+          f"({phase_tol_m:.4g} m integrated) over the observation "
+          f"(anchor: {args.anchor})")
+    print(f"Marginal-segment trade: -drop_pct {args.drop_pct:g}% of the feasible "
+          f"segments discarded (worst phase error first), pooled over all orbits")
+    print()
+
+    # ---- Stage 1: scan orbit grid x phase ----
+    recs = scan_segments(args.t_obs, args, args.p_o, args.sin_i, args.e,
+                         args.omega_peri, args.n_phase, args.nsamp)
+    ajs_grid_from_scan(args, recs, caps, model_lbl)
+
+
+def main_hybrid(args, inf_N, inf_dt):
+    """Hybrid grid: exact circular below p_break, ajs at/above it.
+
+    p_break is the shortest scanned p_o such that every p_o at/above it has mean
+    e=0 ajs coverage (phase gate + caps, before -drop_pct) >= -break_coverage
+    (default 60%).  Because ajs coverage dips near p_o ~ T_obs, this clears the
+    whole inadequate band rather than stopping at the first point that clears.
+    A manual -p_break overrides.  Emits <stem>_circular.csv and <stem>_ajs.csv
+    plus one combined YAML."""
+    args.term_mask = terms_mask(args.terms)
+    model_lbl = terms_label(args.term_mask)
+    phase_tol_m = args.phase_tol_cycles * C * args.p0
+    p_ladder = sorted(set(args.p_o))
+
+    def rng(vals):
+        return (f"{min(vals):g}" if len(vals) == 1
+                else f"{min(vals):g}-{max(vals):g} ({len(vals)})")
+
+    print(f"Hybrid orbit grid: p_o = {rng(args.p_o)} yr, "
+          f"e = {rng(args.e)}, sin_i = {rng(args.sin_i)}, "
+          f"omega_peri = {rng(args.omega_peri)} rad, "
+          f"mass = {args.pulsar_mass:g}+{args.companion_mass:g} Msun, "
+          f"GR = {'on' if args.gr else 'off'}")
+    if inf_N is not None:
+        print(f"Observation: {args.inf} (N = {inf_N}, dt = {inf_dt:g} s)")
+    print(f"T = {args.t_obs:.6g} s ({args.t_obs / 86400.0:.6g} d), "
+          f"p0 = {args.p0} s")
+    print(f"Model terms: v0 + {model_lbl} "
+          f"({sum(args.term_mask)} gridded axis/axes)")
+    print()
+
+    # ---- Stage 1: one full-ladder ajs scan (serves coverage AND the ajs side)
+    recs = scan_segments(args.t_obs, args, args.p_o, args.sin_i, args.e,
+                         args.omega_peri, args.n_phase, args.nsamp)
+
+    # ---- Stage 2: p_break from the e=0 ajs coverage ----
+    cov_caps = _natural_caps(args, min(args.p_o))
+    coverage, used_all_e = ajs_coverage_by_p_o(recs, args, cov_caps, phase_tol_m)
+    if used_all_e:
+        print("WARNING: no e=0 records in the scan; judging p_break coverage "
+              "over ALL e (the circular sub-grid still only covers e=0).")
+
+    print(f"{'p_o [yr]':>14} {'p_o [d]':>10} {'ajs coverage':>14}")
+    for p in p_ladder:
+        c = coverage.get(p)
+        print(f"{p:>14.6g} {p * 365.25:>10.5g} "
+              f"{('-' if c is None else f'{100.0 * c:.1f}%'):>14}")
+
+    if args.p_break is not None:
+        p_break = float(args.p_break)
+        p_break_auto = False
+        print(f"\np_break = {p_break:g} yr (manual -p_break; the "
+              f"-break_coverage {args.break_coverage:g}% rule is ignored)")
+    else:
+        p_break_auto = True
+        # ajs coverage is NOT monotonic in p_o: it dips near p_o ~ T_obs, then
+        # recovers for long orbits.  The switch must clear the WHOLE inadequate
+        # band, so p_break = the shortest p_o such that every scanned p_o >= it
+        # has coverage >= the threshold, i.e. the next ladder point above the
+        # largest p_o that is still below threshold.
+        thresh = args.break_coverage / 100.0
+        bad = [p for p in p_ladder if coverage.get(p, 0.0) < thresh]
+        if not bad:
+            p_break = p_ladder[0]
+            print(f"\nEvery scanned p_o already reaches {args.break_coverage:g}% "
+                  f"ajs coverage; the whole band is gridded ajs.")
+        elif bad[-1] == p_ladder[-1]:
+            p_break = p_ladder[-1] * (1.0 + 1e-9)  # never clears: all circular
+            print(f"\nThe longest scanned p_o still has < {args.break_coverage:g}% "
+                  f"ajs coverage; no p_o clears the threshold, so the whole "
+                  f"band is gridded circular.")
+        else:
+            i_bad = p_ladder.index(bad[-1])
+            p_break = p_ladder[i_bad + 1]
+            print(f"\np_break = {p_break:g} yr ({p_break * 365.25:.5g} d): "
+                  f"circular below, ajs at/above. Last p_o below "
+                  f"{args.break_coverage:g}% is {bad[-1]:g} yr "
+                  f"({bad[-1] * 365.25:.5g} d); the switch clears the whole "
+                  f"inadequate band (ajs coverage is non-monotonic, dipping "
+                  f"near p_o ~ T_obs).")
+
+    circ_periods = [p for p in args.p_o if p < p_break]
+    ajs_recs = [r for r in recs if r["p_o"] >= p_break]
+    ajs_p_min = min((r["p_o"] for r in ajs_recs), default=None)
+
+    outdir = args.outdir
+    os.makedirs(outdir, exist_ok=True)
+    plot_dir = os.path.join(outdir, args.plot_subdir)
     os.makedirs(plot_dir, exist_ok=True)
-    corner_path = os.path.join(plot_dir, "corner_feasible_fraction.png")
-    corner_feasible_fraction(groups, args, corner_path)
-    print(f"Saved corner plot of % orbit kept to {corner_path}")
 
-    cover_path = os.path.join(plot_dir, "claimed_fraction.png")
-    claimed_fraction_plot(recs, args, cover_path)
-    print(f"Saved % phase claimed vs p_o to {cover_path}")
+    # ---- Stage 3a: circular sub-grid (p_o < p_break, e=0) ----
+    circ_spec = None
+    if circ_periods:
+        print(f"\n--- Circular side: {len(circ_periods)} period(s) < p_break ---")
+        circ_spec, omega_b, x, A_T, orbits = derive_circular_grid(
+            args, p_o_values=circ_periods)
+        pb_lo_d = float(2 * np.pi / omega_b[-1] / 86400.0)
+        pb_hi_d = float(2 * np.pi / omega_b[0] / 86400.0)
+        print(f"Circular grid: p_o = {pb_lo_d:.4g}-{pb_hi_d:.4g} d "
+              f"({len(omega_b)} periods), x = {circ_spec['ranges'][1][1]:.4g}-"
+              f"{circ_spec['ranges'][1][2]:.4g} lt-s ({len(x)}), "
+              f"A_T = 0-2pi ({len(A_T)}), kept {circ_spec['n_kept']}/"
+              f"{circ_spec['n_orbits']} orbits")
+        print(f"Total circular templates: {circ_spec['n_trials']:.3e}")
+        write_circular_csv(os.path.join(outdir, f"{args.outstem}_circular.csv"),
+                           omega_b, x, A_T)
+        print(f"Wrote {circ_spec['n_trials']} trial(s) -> "
+              f"{os.path.join(outdir, args.outstem + '_circular.csv')}")
+        circular_corner_plot(orbits, args,
+                             os.path.join(plot_dir, "hybrid_circular_coverage.png"))
+    else:
+        print("\nNo periods below p_break: no circular sub-grid.")
+
+    # ---- Stage 3b: ajs sub-grid (p_o >= p_break), caps from p_break's orbit ----
+    ajs_spec = None
+    if ajs_recs:
+        print(f"\n--- Ajs side: {len(ajs_recs)} scanned segments with "
+              f"p_o >= p_break ---")
+        ajs_caps = _natural_caps(args, ajs_p_min)
+        print(f"Ajs caps (from p_o = {ajs_p_min:g} yr): "
+              f"|accel| <= {ajs_caps[0]:.4g} m/s^2, "
+              f"|jerk| <= {ajs_caps[1]:.4g} m/s^3, "
+              f"|snap| <= {ajs_caps[2]:.4g} m/s^4")
+        ajs_spec = ajs_grid_from_scan(
+            args, ajs_recs, ajs_caps, model_lbl, do_plots=False,
+            csv_path=os.path.join(outdir, f"{args.outstem}_ajs.csv"),
+            yaml_path=_SKIP)
+    else:
+        print("\nNo scanned segments at/above p_break: no ajs sub-grid.")
+
+    # ---- Combined YAML ----
+    n_ajs_trials = 0
+    if ajs_spec:
+        n_ajs_trials = 1
+        for i in range(3):
+            if ajs_spec["active"][i]:
+                lo, hi = ajs_spec["ranges"][i]
+                n_ajs_trials *= int(np.ceil((hi - lo) / ajs_spec["spacings"][i])) + 1
+
+    spec = {
+        "mode": "hybrid",
+        "inf": os.path.abspath(args.inf) if args.inf else None,
+        "p0": float(args.p0),
+        "pdot": float(args.pdot),
+        "t_obs": float(args.t_obs),
+        "phase_tol_cycles": float(args.phase_tol_cycles),
+        "drop_pct": float(args.drop_pct),
+        "terms": model_lbl,
+        "anchor": args.anchor,
+        "companion_mass": float(args.companion_mass),
+        "pulsar_mass": float(args.pulsar_mass),
+        "gr": bool(args.gr),
+        "p_o_yr": [float(x) for x in args.p_o],
+        "e": [float(x) for x in args.e],
+        "sin_i": [float(x) for x in args.sin_i],
+        "omega_peri": [float(x) for x in args.omega_peri],
+        "break_coverage": float(args.break_coverage),
+        "p_break": float(p_break),
+        "p_break_auto": bool(p_break_auto),
+        "coverage_by_p_o": {f"{p:.10g}": float(coverage.get(p, 0.0))
+                            for p in p_ladder},
+        "coverage_used_all_e": bool(used_all_e),
+        "n_circular_trials": int(circ_spec["n_trials"]) if circ_spec else 0,
+        "n_ajs_trials": int(n_ajs_trials),
+        "circular": circ_spec,
+        "ajs": ajs_spec,
+    }
+    yaml_path = os.path.join(outdir, f"{args.outstem}.yaml")
+    with open(yaml_path, "w") as fh:
+        yaml.safe_dump(spec, fh, default_flow_style=False, sort_keys=False)
+    print(f"\nWrote hybrid spec -> {yaml_path}")
+
+
+def main():
+    ap = build_parser()
+    args = ap.parse_args()
+
+    if not 0.0 <= args.drop_pct < 100.0:
+        ap.error("-drop_pct must be in [0, 100)")
+
+    # Observation length from the .inf unless overridden.
+    inf_N = inf_dt = None
+    if args.inf is not None:
+        inf_N, inf_dt, _epoch = read_inf(args.inf)
+        if args.t_obs is None:
+            args.t_obs = inf_N * inf_dt
+    if args.t_obs is None:
+        ap.error("give -inf, or set -t_obs explicitly")
+
+    if args.mode == "circular":
+        return main_circular(args)
+    if args.mode == "hybrid":
+        return main_hybrid(args, inf_N, inf_dt)
+    return main_ajs(args, inf_N, inf_dt)
 
 
 if __name__ == "__main__":

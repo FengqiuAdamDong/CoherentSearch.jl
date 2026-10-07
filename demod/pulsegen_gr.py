@@ -60,6 +60,8 @@ from simulate_orbit_accel_jerk import (  # noqa: E402
     solve_kepler_equation,
 )
 
+FACTORIALS = [1.0, 2.0, 6.0]  # k! for the tau**k/k! accel/jerk/snap basis
+
 # ---------------------------------------------------------------------------
 # Observation I/O
 # ---------------------------------------------------------------------------
@@ -184,6 +186,51 @@ def max_abs_delay(prm):
     return abs(prm.x) + abs(prm.gamma) + shapiro_max
 
 
+def fit_kinematic_coefficients(tau, v, terms=(True, True, True)):
+    """LSQ fit of v_model(tau) = v0 + accel*tau + jerk*tau^2/2 + snap*tau^3/6
+    with the tau**k/k! basis and free v0 -- same convention as
+    generate_search_timeseries.py's fit_kinematic_coefficients and
+    kinematic_grid_spacing.fit_velocity_model, so the coefficients are directly
+    comparable with a kinematic_finder candidate.  Terms left out are not
+    fitted (their coefficient is zero).  Returns a dict with the coefficients
+    and the truncation residual (max/rms |v - fit|)."""
+    tau = np.asarray(tau, dtype=float)
+    v = np.asarray(v, dtype=float)
+    cols = [np.ones_like(tau)]
+    cols += [tau ** (k + 1) / FACTORIALS[k] for k in range(3) if terms[k]]
+    A = np.column_stack(cols)
+    scale = np.max(np.abs(A), axis=0)
+    scale[scale == 0.0] = 1.0  # degenerate span: unscaled
+    coef = np.linalg.lstsq(A / scale, v, rcond=None)[0] / scale
+    resid = v - A @ coef
+    ajs = np.zeros(3)
+    ajs[np.asarray(terms, dtype=bool)] = coef[1:]
+    return dict(v0=float(coef[0]), accel=float(ajs[0]), jerk=float(ajs[1]),
+                snap=float(ajs[2]),
+                max_residual_v=float(np.max(np.abs(resid))),
+                rms_residual_v=float(np.sqrt(np.mean(resid ** 2))))
+
+
+def best_fit_kinematic(prm, p0, pdot, t_obs, t_ref, t_anchor=0.0,
+                       terms=(True, True, True), n_fit=2000):
+    """ONE least-squares accel/jerk/snap fit to the DD-injected pulse train over
+    the whole observation, in the searches' v = c*(P_obs/p0 - 1) convention.
+
+    The delay model gives P_obs/P0 = 1 + dDelta/dt, so the fractional LOS
+    Doppler is exactly the numerical derivative of dd_delay.  tau is measured
+    from `t_anchor` (the epoch the coefficients are reported at): by default the
+    observation midpoint, matching the kinematic searches' -anchor midpoint.
+    The fit residual is the cubic-truncation error of the DD model over this
+    span -- irreducible for an eccentric/GR orbit."""
+    t = np.linspace(0.0, t_obs, n_fit)
+    h = max(t_obs, 1.0) * 1e-6
+    dd_delay_dot = (dd_delay(t + h, prm) - dd_delay(t - h, prm)) / (2.0 * h)
+    # P_obs/P0 = (1 + pdot*T/p0) * (1 + dDelta/dT), as the searches see it.
+    v_over_c = (1.0 + (pdot / p0) * t) * (1.0 + dd_delay_dot) - 1.0
+    return fit_kinematic_coefficients(
+        t - t_anchor, C * v_over_c, terms=terms)
+
+
 def pulse_arrival_times(prm, p0, pdot, t_obs, t_ref=0.0):
     """Arrival times [s since obs start] of every pulse landing in [0, t_obs].
 
@@ -274,6 +321,15 @@ def build_parser():
                        help="Reference epoch for p0, A_T and the delays: "
                             "'start' = the .inf epoch (first sample), "
                             "'midpoint' = obs start + T/2.")
+    g_orb.add_argument("-fit_anchor", choices=("start", "midpoint"),
+                       default="midpoint",
+                       help="Epoch the reported best-fit accel/jerk/snap "
+                            "coefficients are expanded about (midpoint matches "
+                            "the kinematic searches).")
+    g_orb.add_argument("-terms", nargs="+", default=["all"],
+                       choices=("accel", "jerk", "snap", "all"),
+                       help="Which of accel/jerk/snap the best-fit model fits "
+                            "(any subset, or 'all').")
     # Post-Keplerian overrides (default: computed from the masses).
     g_orb.add_argument("-omega_dot", type=float, default=None,
                        help="Override periastron advance [rad/s].")
@@ -303,6 +359,13 @@ def main():
 
     prm = build_dd_params(args)
     t_ref = 0.0 if args.anchor == "start" else t_obs / 2.0
+    t_fit_anchor = 0.0 if args.fit_anchor == "start" else t_obs / 2.0
+    fit_terms = tuple(n in args.terms or "all" in args.terms
+                      for n in ("accel", "jerk", "snap"))
+
+    # Best-fit accel/jerk/snap the searches should recover for this injection.
+    fit = best_fit_kinematic(prm, args.p0, args.pdot, t_obs, t_ref,
+                             t_anchor=t_fit_anchor, terms=fit_terms)
 
     # Noise background.
     if args.real is not None:
@@ -349,6 +412,16 @@ def main():
         delta_r=float(prm.delta_r),
         delta_theta=float(prm.delta_theta),
         K_over_c=float(K_c),
+        fit_anchor=args.fit_anchor,
+        fit_anchor_s=float(t_fit_anchor),
+        fit_terms="+".join(n for n, m in zip(("accel", "jerk", "snap"),
+                                            fit_terms) if m),
+        best_fit_accel=fit["accel"],
+        best_fit_jerk=fit["jerk"],
+        best_fit_snap=fit["snap"],
+        best_fit_v0=fit["v0"],
+        best_fit_max_resid_velocity=fit["max_residual_v"],
+        best_fit_rms_resid_velocity=fit["rms_residual_v"],
     )
     yaml_path = os.path.join(args.outdir, args.outbasename + "_truth.yaml")
     with open(yaml_path, "w") as fh:
@@ -365,6 +438,12 @@ def main():
           f"gamma={prm.gamma:.6e} s, r={prm.r:.6e} s, s={prm.s:.6g}")
     print(f"  max |delay| over orbit: {max_abs:.4g} s "
           f"({100.0 * max_abs / t_obs:.3g}% of T={t_obs:g} s)")
+    print(f"Best-fit kinematic model (anchor {args.fit_anchor}, "
+          f"terms {truth['fit_terms']}):")
+    print(f"  accel={fit['accel']:.6e} m/s^2  jerk={fit['jerk']:.6e} m/s^3  "
+          f"snap={fit['snap']:.6e} m/s^4")
+    print(f"  residual (truncation): max {fit['max_residual_v']:.4e} m/s, "
+          f"rms {fit['rms_residual_v']:.4e} m/s")
 
 
 if __name__ == "__main__":

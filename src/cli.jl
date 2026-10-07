@@ -69,9 +69,13 @@ function parse_cmdline(argv)
     @add_arg_table! s begin
         "fftfile"
             help = "PRESTO FFT file(s) to be searched.  Searching many in one run amortises Julia's start-up compilation over all of them."
-            required = true
-            nargs = '+'
+            required = false
+            nargs = '*'
             arg_type = String
+        "--filelist"
+            help = "Read additional FFT paths from this file, one per line (blank lines ignored).  Use for lists too long for the command line's ARG_MAX; combined with any positional FFT files."
+            arg_type = String
+            default = ""
         "--threshold", "-t"
             help = "S/N cutoff for picking candidates"
             arg_type = Float64
@@ -201,7 +205,15 @@ loads the plotting backend *once* and plots them all.
 """
 function main(argv)
     a = parse_cmdline(argv)
-    fftfiles = a["fftfile"]::Vector{String}
+    fftfiles = copy(a["fftfile"]::Vector{String})
+    if !isempty(a["filelist"])
+        for line in eachline(a["filelist"])
+            path = strip(line)
+            isempty(path) || push!(fftfiles, path)
+        end
+    end
+    isempty(fftfiles) && throw(ArgumentError(
+        "no FFT files given: pass positional paths or --filelist FILE"))
     nfiles = length(fftfiles)
 
     # `-o` and `--plotstem` name a single output; with several inputs they would

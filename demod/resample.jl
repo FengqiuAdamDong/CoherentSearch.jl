@@ -8,6 +8,9 @@
 # anchor epoch: tau = (i + tstart_ind) * tsamp.
 
 const CONST_C_VAL = 299792458.0
+# Two-body / Kepler III constants, matching simulate_orbit_accel_jerk.py.
+const CONST_G = 6.67430e-11
+const CONST_SOLAR_MASS = 1.989e30
 
 # np.round() already loses 0.5 samples, so a tighter tolerance buys nothing.
 const RESAMPLE_TOL_SAMPLES = 0.1
@@ -148,3 +151,134 @@ resample_ts_shift_jerk(ts, accel, jerk, tsamp, tstart_ind; kw...) =
 
 resample_ts_shift(ts, accel, tsamp, tstart_ind; kw...) =
     resample_ts_shift_snap(ts, accel, 0.0, 0.0, tsamp, tstart_ind; kw...)
+
+# --- non-polynomial (orbital) remap ----------------------------------------
+#
+# Port of FFA_stacking/demodulation/utils.py's _integrate_voc_remap /
+# resample_ts_shift_voc.  A circular-orbit LOS Doppler is not polynomial in
+# tau, so `_exact_remap_poly`'s series cannot represent it; instead
+# u(tau) = int_0^tau dt'/(1+voc(t')) is done by cumulative trapezoid, with the
+# grid refined x4 until the peak change over one refinement falls below
+# `tol_samples` samples.
+
+const RESAMPLE_VOC_N0 = 4000
+const RESAMPLE_VOC_NMAX = 2_000_000
+
+# np.linspace(lo, hi, n): n points, endpoints inclusive.
+function _linspace(lo, hi, n)
+    out = Vector{Float64}(undef, n)
+    n == 1 && (out[1] = lo; return out)
+    step = (hi - lo) / (n - 1)
+    @inbounds for i in 1:n
+        out[i] = lo + step * (i - 1)
+    end
+    return out
+end
+
+# np.interp: piecewise linear, clamped to the end values outside [xp[1], xp[end]].
+function _interp(x::Real, xp::AbstractVector, fp::AbstractVector)
+    n = length(xp)
+    x <= xp[1] && return fp[1]
+    x >= xp[n] && return fp[n]
+    lo, hi = 1, n
+    while hi - lo > 1
+        mid = (lo + hi) >> 1
+        if xp[mid] <= x
+            lo = mid
+        else
+            hi = mid
+        end
+    end
+    t = (x - xp[lo]) / (xp[hi] - xp[lo])
+    return fp[lo] + t * (fp[hi] - fp[lo])
+end
+
+_interp(x::AbstractVector, xp, fp) = [_interp(xi, xp, fp) for xi in x]
+
+# scipy.integrate.cumulative_trapezoid(y, x, initial=0.0).
+function _cumtrapz(y::AbstractVector, x::AbstractVector)
+    n = length(y)
+    out = Vector{Float64}(undef, n)
+    out[1] = 0.0
+    @inbounds for i in 2:n
+        out[i] = out[i-1] + 0.5 * (y[i] + y[i-1]) * (x[i] - x[i-1])
+    end
+    return out
+end
+
+"""
+    _integrate_voc_remap(voc_func, tau, tol_samples, tsamp; n0, n_max)
+
+`u(tau) = int_0^tau dt'/(1+voc_func(t'))` by cumulative trapezoid on
+`[min(0,tau), max(0,tau)]`, quadrupling the sample count until the peak change
+over one refinement is below `tol_samples` samples.
+"""
+function _integrate_voc_remap(voc_func, tau::AbstractVector, tol_samples, tsamp;
+                              n0 = RESAMPLE_VOC_N0, n_max = RESAMPLE_VOC_NMAX)
+    lo = min(0.0, minimum(tau))
+    hi = max(0.0, maximum(tau))
+    hi == lo && return zeros(length(tau))
+    n = n0
+    prev = nothing
+    while true
+        t_grid = _linspace(lo, hi, n)
+        cum = _cumtrapz(1.0 ./ (1.0 .+ voc_func(t_grid)), t_grid)
+        u = _interp(tau, t_grid, cum) .- _interp(0.0, t_grid, cum)
+        if prev !== nothing && maximum(abs.(u .- prev)) / tsamp < tol_samples
+            return u
+        end
+        if n >= n_max
+            @warn "_integrate_voc_remap: quadrature did not converge to " *
+                  "$tol_samples samples within $n points -- result may carry " *
+                  "residual error."
+            return u
+        end
+        prev = u
+        n = min(n * 4, n_max)
+    end
+end
+
+"""
+    resample_ts_shift_voc(ts, voc_func, tsamp, tstart_ind; tol_samples) -> (ts_new, tstart_new)
+
+Remove an arbitrary (non-polynomial) LOS Doppler track `voc_func(tau) = v_inj(tau)/c`
+via the exact remap `u(tau) = int_0^tau dt'/(1+voc(tau'))`.  `voc_func` is
+injected sign (positive = receding) and `tau` is measured from the anchor
+(data midpoint), as in `resample_ts_shift_snap`.  Same index-remap convention
+and output as the polynomial remapper.
+"""
+function resample_ts_shift_voc(ts::AbstractVector, voc_func, tsamp, tstart_ind;
+                               tol_samples = RESAMPLE_TOL_SAMPLES)
+    isempty(ts) && return ts, tstart_ind
+    tau = (collect(0:(length(ts) - 1)) .+ tstart_ind) .* float(tsamp)
+    u = _integrate_voc_remap(voc_func, tau, tol_samples, tsamp)
+    ts_new_indices = round.(Int, u ./ tsamp)
+    resampled_tstart_ind = ts_new_indices[1]
+    ts_new_indices .-= ts_new_indices[1]
+    if minimum(diff(ts_new_indices)) < 0
+        error("resample map is not monotonic: voc_func implies |v|/c >= 1 " *
+              "somewhere in this segment's span")
+    end
+    ts_new = zeros(eltype(ts), ts_new_indices[end] + 1)
+    ts_new[ts_new_indices .+ 1] = ts
+    return ts_new, resampled_tstart_ind
+end
+
+"""
+    circular_voc(x_lt_s, pb_s, A_T; t_offset_s = 0.0) -> tau -> v_inj(tau)/c
+
+Injected-sign LOS Doppler of a pure Keplerian circular orbit (e = 0, Roemer
+only, no GR), as a function of `tau` measured from the data-midpoint anchor:
+
+    delay  Δ(t) = x*sin(ω_b*t + A_T),      x = a_p sin(i)/c  [light-seconds]
+    v/c         = dΔ/dt = x*ω_b*cos(ω_b*t + A_T)
+
+`t_offset_s` shifts the midpoint anchor to the epoch at which `A_T` is defined
+(`pulsegen_gr.py -anchor`): T/2 for `start` (the .inf epoch, pulsegen's
+default), 0 for `midpoint`.  `A_T` absorbs the (degenerate, for e = 0)
+argument of periastron.
+"""
+function circular_voc(x_lt_s, pb_s, A_T; t_offset_s = 0.0)
+    omega_b = 2 * pi / pb_s
+    return tau -> x_lt_s * omega_b .* cos.(omega_b .* (tau .+ t_offset_s) .+ A_T)
+end
