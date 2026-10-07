@@ -6,6 +6,11 @@ backslash (\\, \\; \\_ ...) so that exactly one survives into MathJax. Row
 breaks in cases/aligned are written \cr, not \\[Npt] (which the same pass
 mangles). Do not "tidy" these backslashes away, and re-check with the GitHub
 Markdown API if you add new math.
+
+GitHub's math renderer also BLOCKS certain TeX macros outright ("The following
+macros are not allowed"). The operator-name macro is one: use \mathrm (or
+\text) instead. Plain/AMS macros (\frac, \dfrac, \tfrac, \boxed, \underbrace,
+\textstyle, \lbrace, \rbrace, spacing macros) render fine.
 -->
 
 # `demod/` — coherent binary-pulsar demodulation
@@ -224,7 +229,7 @@ where $v_\text{inj}$ is the **injected** velocity (the sign that, when injected
 into the time axis, cancels the observed drift). The resampled series at new
 index $u$ takes the old sample at the time $\tau$ solving $u(\tau)=u$. The
 resampler is exact in the sense that no interpolation is used: sample $i$ maps to
-integer index $\operatorname{round}(u(\tau_i)/dt)$; the map must be monotonic
+integer index $\mathrm{round}(u(\tau_i)/dt)$; the map must be monotonic
 (checked), gaps scatter to zero, and the de-meaning in `demod_dat.jl` removes the
 DC spike that those zero holes would otherwise make.
 
@@ -345,7 +350,7 @@ Of the remaining feasible segments, the worst-phase-error `-drop_pct` percent ar
 discarded (`apply_drop`), pooled over **all** orbits:
 
 * sort the feasible segments by $\Lambda$ ascending (cheapest first),
-* keep $n_\text{keep} = \max\\!\big(\operatorname{round}(n_\text{feas}(1-\text{drop\\_pct}/100)),\\,1\big)$,
+* keep $n_\text{keep} = \max\\!\big(\mathrm{round}(n_\text{feas}(1-\text{drop\\_pct}/100)),\\,1\big)$,
 * the rest stay `feasible` but lose `kept`.
 
 Dropping the worst segments is what lets the grid be coarse: the worst **kept**
