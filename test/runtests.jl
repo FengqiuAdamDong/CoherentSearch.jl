@@ -6,6 +6,7 @@ using Test
     include("test_search.jl")
     include("test_candidate.jl")
     include("test_cli.jl")
+    include("test_demod.jl")
     include("test_toy.jl")
     # Skips itself unless a functional CUDA backend is present; CUDA is a weak
     # dependency, so an ordinary Pkg.test() never has one.

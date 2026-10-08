@@ -18,47 +18,14 @@
 # Literal CSV strings are used for filenames (not reformatted numbers), so the
 # caller can reconstruct the filename from the grid text.  --basename defaults
 # to the input file's stem.  The output .dat files are what realfft consumes.
+#
+# The grid reader and the filename rule live in the package
+# (`CoherentSearch.read_demod_grid` / `demod_point_stem`), shared with the
+# in-memory driver `bin/coherent_search.jl --demod-grid`: one definition, so a
+# filename built here and one built there cannot drift apart.  `demod_file`
+# itself stays in `demod_dat.jl` -- it is the on-disk wrapper the package does
+# not need.
 include(joinpath(@__DIR__, "demod_dat.jl"))
-
-# Returns (mode, rows) where mode is :ajs or :circular and each row is a tuple
-# of raw per-column strings (not parsed floats): the filename must match what
-# the caller builds from the same CSV text.
-function read_grid(csv_path)
-    mode = nothing
-    rows = Tuple[]
-    header = true
-    for line in eachline(csv_path)
-        if header
-            cols = lowercase.(strip.(split(strip(line), ",")))
-            if cols == ["accel", "jerk", "snap"]
-                mode = :ajs
-            elseif cols == ["pb", "x", "at"]
-                mode = :circular
-            else
-                error("$csv_path: unknown header $(join(cols, ",")); expected " *
-                      "accel,jerk,snap or pb,x,at")
-            end
-            header = false
-            continue
-        end
-        isempty(strip(line)) && continue
-        parts = split(line, ",")
-        length(parts) == 3 || error("$csv_path: expected 3 columns, got $(length(parts))")
-        push!(rows, (String(strip(parts[1])), String(strip(parts[2])),
-                     String(strip(parts[3]))))
-    end
-    mode === nothing && error("$csv_path: empty file / no header")
-    return mode, rows
-end
-
-# Output filename for a grid row, from its literal CSV strings.
-function out_name(stem, mode, row)
-    if mode == :ajs
-        return string(stem, "_demod_a", row[1], "_j", row[2], "_s", row[3], ".dat")
-    else
-        return string(stem, "_demod_pb", row[1], "_x", row[2], "_at", row[3], ".dat")
-    end
-end
 
 function main(args)
     length(args) >= 3 || error(
@@ -82,10 +49,10 @@ function main(args)
 
     total = 0
     for grid_path in grid_paths
-        mode, rows = read_grid(grid_path)
+        mode, rows = read_demod_grid(grid_path)
         println("demod_grid: $(length(rows)) $(mode) point(s) from $grid_path")
         for row in rows
-            out = joinpath(outdir, out_name(stem, mode, row))
+            out = joinpath(outdir, demod_point_stem(stem, mode, row) * ".dat")
             if mode == :ajs
                 demod_file(input, out; accel = parse(Float64, row[1]),
                            jerk = parse(Float64, row[2]), snap = parse(Float64, row[3]))

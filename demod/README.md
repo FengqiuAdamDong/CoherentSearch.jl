@@ -28,11 +28,12 @@ The pipeline is:
 1. **Derive a grid** of trial orbital/kinematic parameters
    (`nsns_grid.py`) that is dense enough to phase-connect the orbit to a chosen
    tolerance.
-2. **Demodulate** the time series at every grid point
-   (`demod_grid.jl` → `demod_dat.jl` → `resample.jl`).
-3. **Search** each demodulated series for the pulsar
-   (`coherent_search.jl`, not part of this directory).
-4. **Combine** the per-point candidate lists (`combine_cohout.py`).
+2. **Demodulate, FFT, deredden and search** each grid point, either through the
+   file-based shell pipeline (`demod_grid.jl` → `demod_dat.jl` → PRESTO's
+   `realfft`/`rednoise` → `coherent_search.jl`) or entirely in memory with
+   `bin/coherent_search.jl --demod-grid` (Section 11), which writes only the
+   `.cohout` files.
+3. **Combine** the per-point candidate lists (`combine_cohout.py`).
 
 `nsns_grid.py` has three grid models, selected with `-mode`:
 
@@ -181,7 +182,8 @@ $$
 $$
 
 where $x=a_p\sin i/c$ is in light-seconds (so $\Delta$ is in seconds). This is the
-track the `circular` mode removes exactly (`circular_voc` in `resample.jl`).
+track the `circular` mode removes exactly (`circular_voc` in
+`src/demod.jl`).
 
 ### 2.2 Why phase error is measured in metres
 
@@ -217,7 +219,7 @@ For the `midpoint` anchor the first sample is at $\tau=-T/2$.
 
 ---
 
-## 3. The demodulation operator (`resample.jl`)
+## 3. The demodulation operator (`src/demod.jl`)
 
 A grid point is applied by remapping the time coordinate:
 
@@ -230,7 +232,7 @@ into the time axis, cancels the observed drift). The resampled series at new
 index $u$ takes the old sample at the time $\tau$ solving $u(\tau)=u$. The
 resampler is exact in the sense that no interpolation is used: sample $i$ maps to
 integer index $\mathrm{round}(u(\tau_i)/dt)$; the map must be monotonic
-(checked), gaps scatter to zero, and the de-meaning in `demod_dat.jl` removes the
+(checked), gaps scatter to zero, and the de-meaning in `demodulate_series` removes the
 DC spike that those zero holes would otherwise make.
 
 **Polynomial (ajs) remap** (`_exact_remap_poly`). Expanding
@@ -263,7 +265,7 @@ $1/(1+\text{voc}(t'))$ numerically by cumulative trapezoid on
 $[\min(0,\tau),\max(0,\tau)]$, quadrupling the sample count (from 4000, capped at
 2 000 000) until one refinement changes the result by less than 0.1 samples.
 
-**Anchor.** `demod_dat.jl` anchors the polynomial at the **midpoint** of the input
+**Anchor.** `demodulate_series` anchors the polynomial at the **midpoint** of the input
 series (`reference_mjd = epoch + 0.5 N dt`), which is why the grid's default
 `-anchor midpoint` matches it. For the circular model, `A_T` is the mean anomaly
 at the **start** (the `.inf` epoch, matching `pulsegen_gr.py -anchor start`); the
@@ -568,7 +570,7 @@ $$
 $$
 
 with $t$ the **absolute** time since the observation start (because $A_T$ is
-anchored at the start; `demod_dat.jl` maps the midpoint anchor back to the start).
+anchored at the start; `demodulate_series` maps the midpoint anchor back to the start).
 Equivalently $\Phi = (1/p_0)\int (v/c)\\,\mathrm{d}t$.
 
 ### 5.3 First-order perturbation: the three amplitudes
@@ -798,7 +800,7 @@ A manual `-p_break` (in yr) overrides the search entirely.
 Hybrid writes `<outstem>_circular.csv` (`pb,x,at`) and `<outstem>_ajs.csv`
 (`accel,jerk,snap`), plus one combined `<outstem>.yaml` with `mode: hybrid`,
 `p_break`, the per-`p_o` coverage, and both sub-specs nested under `circular:`
-and `ajs:`. `demod_grid.jl` accepts both CSVs in one invocation (it reads each
+and `ajs:`. `--demod-grid` accepts both CSVs in one invocation (it reads each
 file's own header), and `run_nsns_sweep.sh MODE=hybrid` reads each point's model
 from its CSV header so both filename patterns coexist.
 
@@ -857,9 +859,10 @@ with explicit per-model CSV paths.
 | file | what it does |
 |---|---|
 | `nsns_grid.py` | **Grid derivation** (both modes), YAML/CSV/plots. |
-| `resample.jl` | The exact time-remap resamplers (polynomial and non-polynomial). |
-| `demod_dat.jl` | Apply the remap to one `.dat`/`.inf`; CLI + library `demod_file`. |
-| `demod_grid.jl` | Batch: demodulate one observation at every row of a grid CSV, in one Julia process. |
+| `src/demod.jl` (package) | The exact time-remap resamplers, PRESTO's `.fft` packing, `presto_deredden!` and `demodulate_series`. Was `demod/resample.jl`; moved into the package so the in-memory driver uses the same code. |
+| `demod_dat.jl` | On-disk wrapper: apply the remap to one `.dat`/`.inf`; CLI + `demod_file`. |
+| `demod_grid.jl` | Batch, on disk: demodulate one observation at every row of a grid CSV, in one Julia process. |
+| `src/demodsearch.jl` (package) | The in-memory driver behind `bin/coherent_search.jl --demod-grid` (Section 11). |
 | `pulsegen_gr.py` | Inject a full Damour–Deruelle binary pulsar into a `.dat`/`.inf` (+ `_truth.yaml`). |
 | `run_demod_search.sh` | End-to-end: inject → derive grid → nearest grid point → demod → search. |
 | `test_circular_demod.sh` | Same, for circular mode, with assertions on recovery. |
@@ -902,9 +905,22 @@ python demod/nsns_grid.py -inf OBS.inf -mode hybrid -p_break 0.02 -break_coverag
 python demod/test_circular_grid.py -inf OBS.inf -drop_pct 0 -n_mc 2000
 ```
 
+The in-memory driver replaces steps 2 and 3 for a whole sweep -- one process, one
+read of the `.dat`, and only `.cohout` written (**no** `realfft`/`rednoise`
+needed at run time):
+
+```sh
+julia --project=. -t auto bin/coherent_search.jl OBS.dat \
+      --demod-grid GRID.csv --outdir OUT --threshold 6
+```
+
+`--demod-grid` may be repeated (hybrid grids emit one CSV per model).  It rejects
+`-o`, `--plot` and `--plotstem`; plot afterwards from the `.cohout` files with
+`bin/plot_candidates.jl`.  Section 11 has the details.
+
 Requires Julia with the `CoherentSearch.jl` project, a Python with
-numpy/scipy/matplotlib/yaml, PRESTO's `realfft`/`rednoise` on `PATH`, and the
-sibling `FFA_stacking` checkout.
+numpy/scipy/matplotlib/yaml, PRESTO's `realfft`/`rednoise` on `PATH` (for the
+shell pipeline only), and the sibling `FFA_stacking` checkout.
 
 ---
 
@@ -915,3 +931,85 @@ sibling `FFA_stacking` checkout.
 * `test_circular_demod.sh` — end-to-end circular inject → grid → demod → search,
   asserting the pulsar is recovered near $1/p_0$ above a threshold S/N.
 * `run_demod_search.sh` — end-to-end ajs (and circular) smoke test.
+
+---
+
+## 11. In-memory demodulation: `bin/coherent_search.jl --demod-grid`
+
+The shell pipeline writes and re-reads about five files per grid point -- a
+`.dat`, an `.inf`, a `.fft`, and a `_red.fft` plus its `.inf` -- and every one of
+them is a pure intermediate.  A 220-point sweep writes ~1100 files, reads them
+all back, and pays a Julia process start-up per point.
+
+`--demod-grid` does the whole chain inside one process, per grid point:
+
+```
+raw .dat held in RAM  ->  exact time remap  ->  real FFT  ->  rednoise
+                      ->  coherent search    ->  <stem>_demod_..._red.cohout
+```
+
+The observation is read **once**; peak memory is the raw series plus one
+demodulated series plus one amplitude array, independent of the grid size.
+Nothing but the `.cohout` files is written.
+
+```sh
+julia --project=. -t auto bin/coherent_search.jl OBS.dat \
+      --demod-grid GRID.csv --outdir OUT --threshold 6
+# hybrid grids: repeat the flag, one CSV per model
+julia --project=. -t auto bin/coherent_search.jl OBS.dat \
+      --demod-grid circgrid.csv --demod-grid ajsgrid.csv --outdir OUT
+```
+
+* Every search option applies as it would to an `.fft` file: the driver reuses
+  the CLI's own `search_one`, so `--nharms`, `--maxdecim`, `--ncands`,
+  `--metricstats`, `--sigma`, `--precision`, `--gpu` and the duty-cycle
+  measurement all behave identically.
+* `-o`/`--outputfilenm`, `--plot` and `--plotstem` are **rejected** -- each names
+  a single output a sweep would clobber, and deferred plotting would hold every
+  grid point's amplitudes.  Plot afterwards from the `.cohout` files with
+  `bin/plot_candidates.jl`.
+* Output is `<stem>_demod_a<A>_j<J>_s<S>_red.cohout` (ajs) or
+  `<stem>_demod_pb<Pb>_x<X>_at<AT>_red.cohout` (circular), where the parameter
+  text is the **literal CSV string**.  The `_red` infix is deliberate:
+  `combine_cohout.py`'s `MODELS` regexes end in `_red\.cohout$`, so the existing
+  sift/combine tooling works unchanged.
+* `--rednoise-startwidth` / `--rednoise-endwidth` / `--rednoise-endfreq` pass
+  PRESTO's rednoise knobs (defaults 6 / 100 / 6.0).
+* Demodulation is **sequential** and only the search is threaded: the search is
+  the dominant cost (~2.4 s of a ~2.7 s point at `--nharms 16`) and already
+  parallelises internally with `@spawn`, so overlapping demodulations would only
+  oversubscribe those threads.  `-t` controls the whole run.
+* The FFTW plan for each demodulated length is built with `FFTW.ESTIMATE`, not
+  `MEASURE`: for `N = 6e6` those cost 15 ms and **35.5 s** respectively, and each
+  grid point lands on its own length (`N'` varies per point by hundreds of
+  samples) so `MEASURE` would be paid over and over.
+
+**Agreement with the file-based chain.**  The same demodulated series run both
+ways gives the same best candidate; on a 1 s injected pulsar at `--nharms 16`
+that is `f = 1.000192 Hz` (truth 1.0) at S/N 8.64, matching the on-disk
+`realfft`+`rednoise`+search to within one Fourier bin and 1% of S/N.  The
+comparison is pinned by `test/test_demod.jl`.
+
+The underlying ports, so a failure can be localised:
+
+| step | port | agreement |
+|---|---|---|
+| real FFT (`presto_fft_amps`) | `FFTW.rfft`, DC/Nyquist packed into bin 1 | `1.2e-3` worst bin, `2.6e-5` rms, Nyquist exact |
+| rednoise (`presto_deredden!`) | `dered_engine` (`presto/src/misc_utils.c`) | **`2.5e-7`** max relative amplitude |
+
+Two details of the rednoise port are load-bearing and were measured against the
+shipped binaries, not the C source's intent:
+
+* **The median is the LOWER order statistic.**  `src/median.c` calls
+  `gsl_stats_float_median`, which is documented to average the two central values
+  for even `n` -- but the `libpresto.so` that `rednoise` actually links returns
+  `sorted[(n+1)/2]`.  Verified by calling `libpresto.so:median` directly on sorted
+  data (n = 6, 8, 100).  The mean-of-two form puts every block's median ~7% high
+  on a log-distributed power spectrum, so the normalisation is 7% too strong and
+  every amplitude -- and every S/N -- comes out ~7% low, silently.
+* **`invsqrtf` is the Quake reciprocal-sqrt**, bit-exact (`0x5f3759df`, one Newton
+  step), not `1/sqrt` -- the two differ by ~0.1%.
+
+Both are pinned by `test/test_demod.jl`; the `$REDNOISE`-gated test compares
+against PRESTO itself, so a future PRESTO whose `median` really did interpolate
+would fail loudly rather than quietly shift every S/N by 7%.

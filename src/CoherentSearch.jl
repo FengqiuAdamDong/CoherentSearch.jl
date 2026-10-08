@@ -21,6 +21,19 @@ using Logging: with_logger, NullLogger
 export FFTFile, SimpleInf, freqs
 include("fileio.jl")
 
+# --- In-memory demodulation, PRESTO FFT packing and PRESTO's rednoise ---
+# Included after `fileio.jl` (it uses `SimpleInf`'s field names in its doc) and
+# before `demodsearch.jl`.  Nothing here needs the search, so the position is
+# only about the driver below.
+export CONST_C_VAL, CONST_G, CONST_SOLAR_MASS,
+       RESAMPLE_TOL_SAMPLES, RESAMPLE_MAX_ORDER, RESAMPLE_VOC_N0, RESAMPLE_VOC_NMAX,
+       polyadd, polymul, polyint, polyval, projected_x,
+       resample_ts_shift_snap, resample_ts_shift_jerk, resample_ts_shift,
+       resample_ts_shift_voc, circular_voc,
+       presto_fft_amps, presto_invsqrt, presto_deredden!,
+       demodulate_series, read_demod_grid, demod_point_stem
+include("demod.jl")
+
 # --- Fourier interpolation kernels ---
 export finterp_coeffs, fourier_interp, fourier_interpolate, finterp_multi,
        finterp_fft, finterp_fft_coeffs, nearby_fourier_bins,
@@ -72,6 +85,12 @@ include("candidate.jl")
 # codegen on *every* run, plus ~1.6 s for ArgParse's first `parse_args`.
 include("cli.jl")
 
+# --- In-memory demodulation driver (`--demod-grid`) ---
+# After `cli.jl`: it reuses `search_one`/`write_candidates`/`resolve_backend`
+# verbatim, so a grid point is searched exactly as an `.fft` is.
+export demod_main
+include("demodsearch.jl")
+
 # ---------------------------------------------------------------------------
 # Precompile workload
 #
@@ -112,6 +131,27 @@ using PrecompileTools: @setup_workload, @compile_workload
              "--nharms", "8", "--blocksize", "64", "--lofreq", "0.6",
              "--hifreq", "0.64", "--nowisdom",
              "-o", joinpath(_dir, "synthetic.cohout")]
+    # The demodulation driver needs its own tiny `.dat`/`.inf` pair and a 1-row
+    # grid CSV, in the same temp directory.  Small on purpose: this only has to
+    # reach the code paths `demod_main` adds (the grid reader, the resampler, the
+    # rfft packing and the rednoise walk), and a bigger series would cost
+    # precompilation time for the same coverage.  `_dN` is even, as `realfft`
+    # requires, and 8192 keeps the dereddening walk over ~30 log-spaced blocks.
+    _dN = 1 << 13
+    _datpath = joinpath(_dir, "synthetic_ts.dat")
+    write(_datpath, zeros(Float32, _dN))
+    write(joinpath(_dir, "synthetic_ts.inf"),
+          " Object being observed                      =  PRECOMPILE\n" *
+          " Epoch of observation (MJD)                 =  5.0e4\n" *
+          " Number of bins in the time series          =  $_dN\n" *
+          " Width of each time series bin (sec)        =  $_dt\n" *
+          " Dispersion measure (cm-3 pc)               =  0.0\n")
+    _gridpath = joinpath(_dir, "grid.csv")
+    write(_gridpath, "pb,x,at\n0.041666666666666664,0.41361909,0.7\n")
+    _demod_argv = [_datpath, "--demod-grid", _gridpath, "--outdir", _dir,
+                   "--noprogress", "--threshold", "1e9", "--nharms", "8",
+                   "--blocksize", "64", "--lofreq", "0.1", "--hifreq", "5.0",
+                   "--nowisdom"]
 
     @compile_workload begin
         # `search` directly, then the CLI below, so both entry points are cached.
@@ -130,6 +170,11 @@ using PrecompileTools: @setup_workload, @compile_workload
         # package-precompilation noise.
         with_logger(NullLogger()) do
             main(_argv)
+        end
+        # …and the demodulation path, which `main` reaches only via
+        # `--demod-grid` and so is otherwise inferred on the first real sweep.
+        with_logger(NullLogger()) do
+            main(_demod_argv)
         end
     end
 end

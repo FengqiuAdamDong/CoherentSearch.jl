@@ -21,7 +21,7 @@
 #   1. Derive the grid from one observation's .inf (nsns_grid.py -mode $MODE).
 #      Emits a YAML spec and one CSV per model of every concrete trial.
 #   2. Batch-demodulate the observation at every grid point, in ONE Julia
-#      process (demod/demod_grid.jl -> demod/demod_dat.jl -> resample.jl).
+#      process (demod/demod_grid.jl -> demod/demod_dat.jl -> src/demod.jl).
 #   3. For each point: realfft -> rednoise -> coherent search (coherent_search.jl
 #      defaults; override via SEARCH_ARGS).  Every point keeps its own files,
 #      flat under $OUTDIR.  On the CPU the searches run NPROC-wide in parallel
@@ -274,7 +274,7 @@ split_spec() {  # $1 = "mode f1 f2 f3"
 }
 
 # Per-point filename stem, keyed on that point's model.  Matches
-# demod_grid.jl's out_name() and combine_cohout.py's regexes.
+# CoherentSearch.demod_point_stem() and combine_cohout.py's regexes.
 point_stem() {  # $1 mode, $2 f1, $3 f2, $4 f3
     if [ "$1" = "circular" ]; then
         echo "${INBASE}_demod_pb$2_x$3_at$4"

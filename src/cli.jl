@@ -15,57 +15,16 @@
 using ArgParse
 using Printf: @printf, @sprintf
 
-function parse_cmdline(argv)
-    s = ArgParseSettings(
-        prog = "coherent_search",
-        description = "Search PRESTO-style FFT files for pulsations using coherent harmonic folding.",
-        epilog = """
-        The input FFT file MUST be normalized (Fourier powers with mean ~ 1); the
-        S/N metric assumes unit-variance noise, so an un-normalized FFT produces
-        meaningless (hugely inflated) S/N values.  Normalize an un-normalized FFT
-        with PRESTO's `rednoise` routine, which also removes red noise.  The FFT
-        should also be barycentered and have known RFI zapped.  The detection
-        metric is the peak boxcar matched-filter S/N over a geometric bank of
-        top-hat widths -- riptide's `snr1` statistic exactly, so S/N values are
-        directly comparable with rseek's -- whose pure-noise distribution is
-        analytic and flat across widths and harmonic decimations, so one
-        --threshold means one false-alarm rate for every k.
-        Near-identical candidates are collapsed by default (--noremove disables it),
-        as are harmonically-related ones -- the f/2, 2f, 3f/2, ... family of a real
-        signal (--noharmremove disables it, --numharm sets the max harmonic).
-        HARMONIC DECIMATION (--maxdecim, default 6) also folds each fundamental at
-        2..k times its frequency almost for free, re-using the interpolated
-        harmonics and summing nharms/k of them; the reported harmonic count
-        identifies which decimation found each candidate.  It is what sets the
-        top of the searched band: --hifreq is the highest FUNDAMENTAL, and the
-        defaults 125 Hz x 6 cover spin frequencies to 750 Hz -- past the 716 Hz
-        of the fastest known pulsar -- in 120 down to 20 profile bins.
-        A progress meter prints to stderr (--progressbar for a bar, --noprogress off).
-        Pass `-t auto` to Julia for multi-threaded runs.
+"""
+    search_argtable!(s::ArgParseSettings)
 
-        SEVERAL FFT FILES may be given, and searching them in one invocation is
-        strongly preferred to one invocation each: Julia's compilation of the
-        search is paid once (~10 s) rather than per file, and the harmonic plans,
-        FFTW plans and per-thread workspaces are built once and reused, so each
-        extra file costs only its own search time.  Use it for a DM or beam sweep.
-
-        OUTPUT: with a single file and no -o, candidates go to stdout (as before).
-        With several files -o is ambiguous and rejected; each file's candidates are
-        instead written beside it as <fftfile-without-.fft>.cohout.  --outdir
-        redirects those .cohout files into one directory (and selects .cohout
-        naming even for a single file).  `bin/sift_candidates.py` reads .cohout.
-
-        PLOTTING is OFF by default and enabled with --plot, at which point it is
-        deferred: all searches run first, and the plotting backend (CairoMakie) is
-        loaded once at the very end to plot every file's candidates.  Off by
-        default because it costs ~9 s to load plus first-call compilation, and
-        because deferring it keeps every input's mmap live to the end of the run
-        (50 large files is tens of GB of address space pinned at once) -- neither
-        of which a pipeline wants.  Candidates can always be plotted afterwards
-        from the .cohout files with bin/plot_candidates.jl.  --noplot is still
-        accepted, and ignored, so existing scripts keep working.
-        """,
-    )
+Add every search option to `s`.  Split out of [`parse_cmdline`](@ref) so the
+in-memory demodulation driver (`--demod-grid`, see `demodsearch.jl`) reuses the
+*whole* search interface rather than a hand-maintained subset that would drift:
+`demod_main` searches every grid point exactly as the CLI searches an `.fft`,
+so it must accept the same knobs.
+"""
+function search_argtable!(s::ArgParseSettings)
     @add_arg_table! s begin
         "fftfile"
             help = "PRESTO FFT file(s) to be searched.  Searching many in one run amortises Julia's start-up compilation over all of them."
@@ -76,6 +35,23 @@ function parse_cmdline(argv)
             help = "Read additional FFT paths from this file, one per line (blank lines ignored).  Use for lists too long for the command line's ARG_MAX; combined with any positional FFT files."
             arg_type = String
             default = ""
+        "--demod-grid"
+            help = "Demodulate in memory instead of searching an .fft: treat the positional inputs as PRESTO .dat time series and read this grid CSV (from demod/nsns_grid.py; repeat the flag to pass several, as hybrid mode emits one per model).  Each row is demodulated, FFT'd and dereddened in RAM, then searched with every other option below, and only <stem>_demod_..._red.cohout is written -- no intermediate .dat/.inf/.fft.  Rejects -o, --plot and --plotstem (they name one output, and a sweep has many); plot afterwards from the .cohout files with bin/plot_candidates.jl."
+            action = :append_arg
+            arg_type = String
+            default = String[]
+        "--rednoise-startwidth"
+            help = "PRESTO rednoise -startwidth: initial window size in Fourier bins for the running-median normalisation.  Only used with --demod-grid"
+            arg_type = Int
+            default = 6
+        "--rednoise-endwidth"
+            help = "PRESTO rednoise -endwidth: final (maximum) window size in Fourier bins.  Only used with --demod-grid"
+            arg_type = Int
+            default = 100
+        "--rednoise-endfreq"
+            help = "PRESTO rednoise -endfreq: highest frequency (Hz) where the window still grows.  Only used with --demod-grid"
+            arg_type = Float64
+            default = 6.0
         "--threshold", "-t"
             help = "S/N cutoff for picking candidates"
             arg_type = Float64
@@ -193,63 +169,79 @@ function parse_cmdline(argv)
             arg_type = Int
             default = 5
     end
+    return s
+end
+
+function parse_cmdline(argv)
+    s = ArgParseSettings(
+        prog = "coherent_search",
+        description = "Search PRESTO-style FFT files for pulsations using coherent harmonic folding.",
+        epilog = """
+        The input FFT file MUST be normalized (Fourier powers with mean ~ 1); the
+        S/N metric assumes unit-variance noise, so an un-normalized FFT produces
+        meaningless (hugely inflated) S/N values.  Normalize an un-normalized FFT
+        with PRESTO's `rednoise` routine, which also removes red noise.  The FFT
+        should also be barycentered and have known RFI zapped.  The detection
+        metric is the peak boxcar matched-filter S/N over a geometric bank of
+        top-hat widths -- riptide's `snr1` statistic exactly, so S/N values are
+        directly comparable with rseek's -- whose pure-noise distribution is
+        analytic and flat across widths and harmonic decimations, so one
+        --threshold means one false-alarm rate for every k.
+        Near-identical candidates are collapsed by default (--noremove disables it),
+        as are harmonically-related ones -- the f/2, 2f, 3f/2, ... family of a real
+        signal (--noharmremove disables it, --numharm sets the max harmonic).
+        HARMONIC DECIMATION (--maxdecim, default 6) also folds each fundamental at
+        2..k times its frequency almost for free, re-using the interpolated
+        harmonics and summing nharms/k of them; the reported harmonic count
+        identifies which decimation found each candidate.  It is what sets the
+        top of the searched band: --hifreq is the highest FUNDAMENTAL, and the
+        defaults 125 Hz x 6 cover spin frequencies to 750 Hz -- past the 716 Hz
+        of the fastest known pulsar -- in 120 down to 20 profile bins.
+        A progress meter prints to stderr (--progressbar for a bar, --noprogress off).
+        Pass `-t auto` to Julia for multi-threaded runs.
+
+        SEVERAL FFT FILES may be given, and searching them in one invocation is
+        strongly preferred to one invocation each: Julia's compilation of the
+        search is paid once (~10 s) rather than per file, and the harmonic plans,
+        FFTW plans and per-thread workspaces are built once and reused, so each
+        extra file costs only its own search time.  Use it for a DM or beam sweep.
+
+        OUTPUT: with a single file and no -o, candidates go to stdout (as before).
+        With several files -o is ambiguous and rejected; each file's candidates are
+        instead written beside it as <fftfile-without-.fft>.cohout.  --outdir
+        redirects those .cohout files into one directory (and selects .cohout
+        naming even for a single file).  `bin/sift_candidates.py` reads .cohout.
+
+        PLOTTING is OFF by default and enabled with --plot, at which point it is
+        deferred: all searches run first, and the plotting backend (CairoMakie) is
+        loaded once at the very end to plot every file's candidates.  Off by
+        default because it costs ~9 s to load plus first-call compilation, and
+        because deferring it keeps every input's mmap live to the end of the run
+        (50 large files is tens of GB of address space pinned at once) -- neither
+        of which a pipeline wants.  Candidates can always be plotted afterwards
+        from the .cohout files with bin/plot_candidates.jl.  --noplot is still
+        accepted, and ignored, so existing scripts keep working.
+        """,
+    )
+    search_argtable!(s)
     return parse_args(argv, s)
 end
 
 """
-    main(argv) -> Nothing
+    resolve_backend(a) -> SearchBackend
 
-Entry point for the `coherent_search` command line.  Searches every FFT file in
-`argv`, writing each one's candidates as it finishes, then — only with `--plot` —
-loads the plotting backend *once* and plots them all.
+Resolve the compute backend and finish resolving `--blocksize` for it.  Factored
+out of [`main`](@ref) so the in-memory demodulation driver resolves its backend
+identically -- both entry points must load CUDA (or not) the same way, and both
+must apply the per-backend default rather than one of them silently running a GPU
+search at the CPU's `--blocksize`.
+
+On the CPU this is a no-op returning `CPUBackend()`.  With `--gpu` it loads
+CUDA.jl on demand (a weak dependency: a CPU-only install never pays for it),
+validates the options the device path cannot honour, and resolves
+`--blocksize` to `GPU_DEFAULT_BLOCKSIZE` when it was left at 0.
 """
-function main(argv)
-    a = parse_cmdline(argv)
-    fftfiles = copy(a["fftfile"]::Vector{String})
-    if !isempty(a["filelist"])
-        for line in eachline(a["filelist"])
-            path = strip(line)
-            isempty(path) || push!(fftfiles, path)
-        end
-    end
-    isempty(fftfiles) && throw(ArgumentError(
-        "no FFT files given: pass positional paths or --filelist FILE"))
-    nfiles = length(fftfiles)
-
-    # `-o` and `--plotstem` name a single output; with several inputs they would
-    # silently have each file overwrite the last.  Reject rather than guess.
-    if nfiles > 1 && !isempty(a["outputfilenm"])
-        throw(ArgumentError("-o/--outputfilenm names one output file but $nfiles FFT files were given; " *
-                            "omit it (each file gets its own .cohout) or use --outdir"))
-    end
-    if nfiles > 1 && !isempty(a["plotstem"])
-        throw(ArgumentError("--plotstem names one plot stem but $nfiles FFT files were given; " *
-                            "omit it (each file's plots are named after its own .cohout)"))
-    end
-    # `--plotstem` only means anything with `--plot`; silently ignoring it would
-    # leave someone waiting for PNGs that are never coming.
-    if !a["plot"] && !isempty(a["plotstem"])
-        @warn "--plotstem given but plotting is off; pass --plot to produce them"
-    end
-
-    outdir = a["outdir"]
-    isempty(outdir) || mkpath(outdir)
-
-    maxdecim = a["maxdecim"]
-    nharms = a["nharms"]
-    decimations = decimation_set(nharms, maxdecim)
-    # One `SearchParams` for every file — `SearchCache` keys its reuse on this
-    # object's identity, so it must not be rebuilt inside the loop.
-    params = SearchParams(
-        nharms = nharms,
-        m = a["m"],
-        hidr = a["hidr"],
-        threshold = a["threshold"],
-        decimations = decimations,
-        precision = Symbol(a["precision"]),
-        sigma = Symbol(a["sigma"]),
-    )
-
+function resolve_backend(a)
     # `--gpu` loads CUDA.jl on demand.  It is a WEAK dependency, so it is not in
     # the manifest of a CPU-only install and `using CoherentSearch` never pays for
     # it; the cost lands here, once per invocation (~6 s), and a run over many
@@ -315,6 +307,76 @@ function main(argv)
     # nothing about the GPU finding above applies to `_search_region!`, where
     # shrinking the chunk was measured WORSE at every thread count (CLAUDE.md).
     a["blocksize"] == 0 && (a["blocksize"] = CPU_DEFAULT_BLOCKSIZE)
+    return backend
+end
+
+"""
+    main(argv) -> Nothing
+
+Entry point for the `coherent_search` command line.  Searches every FFT file in
+`argv`, writing each one's candidates as it finishes, then — only with `--plot` —
+loads the plotting backend *once* and plots them all.
+"""
+function main(argv)
+    a = parse_cmdline(argv)
+    # `--demod-grid` is a different mode of operation, not a search option: the
+    # positional inputs are PRESTO `.dat` time series, and the whole chain runs
+    # in memory per grid point.  Dispatch before anything below assumes `.fft`.
+    isempty(a["demod-grid"]) || return demod_main(a)
+    fftfiles = copy(a["fftfile"]::Vector{String})
+    if !isempty(a["filelist"])
+        for line in eachline(a["filelist"])
+            path = strip(line)
+            isempty(path) || push!(fftfiles, path)
+        end
+    end
+    isempty(fftfiles) && throw(ArgumentError(
+        "no FFT files given: pass positional paths or --filelist FILE"))
+    # A `.dat` here would fail deep inside `FFTFile`, which strips 4 characters
+    # and looks for `X.inf` -- so it would read the *time series'* metadata as
+    # the FFT's and complain about a missing `.fft`, or worse, silently search
+    # the wrong thing.  Say what to do instead.
+    for path in fftfiles
+        endswith(path, ".dat") && throw(ArgumentError(
+            "$path is a time series (.dat): searching it needs --demod-grid CSV [CSV...]"))
+    end
+    nfiles = length(fftfiles)
+
+    # `-o` and `--plotstem` name a single output; with several inputs they would
+    # silently have each file overwrite the last.  Reject rather than guess.
+    if nfiles > 1 && !isempty(a["outputfilenm"])
+        throw(ArgumentError("-o/--outputfilenm names one output file but $nfiles FFT files were given; " *
+                            "omit it (each file gets its own .cohout) or use --outdir"))
+    end
+    if nfiles > 1 && !isempty(a["plotstem"])
+        throw(ArgumentError("--plotstem names one plot stem but $nfiles FFT files were given; " *
+                            "omit it (each file's plots are named after its own .cohout)"))
+    end
+    # `--plotstem` only means anything with `--plot`; silently ignoring it would
+    # leave someone waiting for PNGs that are never coming.
+    if !a["plot"] && !isempty(a["plotstem"])
+        @warn "--plotstem given but plotting is off; pass --plot to produce them"
+    end
+
+    outdir = a["outdir"]
+    isempty(outdir) || mkpath(outdir)
+
+    maxdecim = a["maxdecim"]
+    nharms = a["nharms"]
+    decimations = decimation_set(nharms, maxdecim)
+    # One `SearchParams` for every file — `SearchCache` keys its reuse on this
+    # object's identity, so it must not be rebuilt inside the loop.
+    params = SearchParams(
+        nharms = nharms,
+        m = a["m"],
+        hidr = a["hidr"],
+        threshold = a["threshold"],
+        decimations = decimations,
+        precision = Symbol(a["precision"]),
+        sigma = Symbol(a["sigma"]),
+    )
+
+    backend = resolve_backend(a)
 
     cache = SearchCache()
     # Deferred plotting: (FFTFile, candidates, stem) per file with something to

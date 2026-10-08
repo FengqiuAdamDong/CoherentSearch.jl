@@ -96,7 +96,8 @@ compare/              head-to-head benchmark against riptide's rseek
 mc/                   the injection Monte Carlo: sensitivity vs. the other codes
 bench/                microbenchmarks and phase timings (its own environment)
 demod/                binary-pulsar demodulation: grid derivation, time-remap,
-                      full sweep (see demod/README.md)
+                      full sweep (see demod/README.md); the in-memory chain
+                      lives in src/demod.jl, src/demodsearch.jl
 docs/                 design notes, the GPU log, and the measurement record
 sysimage/             optional PackageCompiler sysimage for production runs
 ```
@@ -122,8 +123,27 @@ search on each result.
   dipping near `p_o ~ T_obs`), so each regime covers the orbits it is best at.
 
 The full derivation of the grid spacings, the phase-budget guarantee, the
-demodulation operator, and worked examples are in **`demod/README.md`**. The
-end-to-end driver is `demod/run_nsns_sweep.sh` (`MODE=ajs|circular|hybrid`).
+demodulation operator, and worked examples are in **`demod/README.md`**.
+
+A sweep can run entirely in memory, writing only the candidate files:
+
+```sh
+julia --project=. -t auto bin/coherent_search.jl OBS.dat \
+      --demod-grid GRID.csv --outdir OUT --threshold 6
+```
+
+`--demod-grid` loads the `.dat` once, then per grid point demodulates, FFTs,
+dereddens and searches in RAM — so the ~5 intermediate files per point that the
+shell pipeline writes (`.dat`, `.inf`, `.fft`, `_red.fft`, `_red.inf`) never
+exist, and a 220-point sweep no longer starts 220 Julia processes. It reuses
+every search option and writes only `<stem>_demod_..._red.cohout`, which the
+existing `combine_cohout.py` parses unchanged. Every search option applies as it
+would to an `.fft`; `-o`, `--plot` and `--plotstem` are rejected (they name one
+output each). PRESTO's `rednoise` is reproduced in-process to 2.5e-7, and
+`FFTW.rfft` reproduces `realfft`'s `.fft` layout. See `demod/README.md` §11.
+
+The file-based end-to-end driver remains `demod/run_nsns_sweep.sh`
+(`MODE=ajs|circular|hybrid`).
 
 ## Design notes
 
