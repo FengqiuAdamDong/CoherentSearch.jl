@@ -30,11 +30,26 @@ use on a real `.fft` file ([`search_one`](@ref) is reused verbatim, so
 identically).  One `<stem>_demod_<grid>_red.cohout` is written per point, into
 `--outdir` or beside the input.
 
-**Sequential demodulation, threaded search.**  The search is the dominant cost
-(measured ~2.4 s of a 2.7 s in-process point at `--nharms 16`) and it already
-parallelises internally with `@spawn` over chunks, so overlapping demodulations
-across grid points would only oversubscribe the threads the search is using.
-`-t` controls the whole run.
+**Sequential demodulation, concurrent searches.**  The search is the dominant
+cost (~1.7 s of a ~1.75 s in-process point at `--nharms 60`), and a demodulation
+is serial at ~25 ms — during which every worker would idle if one search held the
+whole thread pool.  Measured: letting one search use all `-t 16` threads takes
+14.6 s for 64 points at `--nharms 60`, while searching 16 points at once, each
+single-threaded, takes 10.2 s — **1.43x**.  So `--demod-concurrency N` (default
+one slot per thread) searches N grid points concurrently, each pinned to
+`nthreads()/N` threads.  `N = 1` is the purely sequential driver.
+
+Note what this is *not*: the parallel axis is inside this one process, never one
+process per grid point.  Running a process per point was measured at only
+1.06–1.13x over the sequential driver, because it re-reads the `.dat` and re-pays
+Julia's start-up, plan building and wisdom import per point (~0.85 s against a
+~1.8 s point).  The observation is read once here, as intended.
+
+Concurrent searches must not share a `SearchCache`: `Workspace`s are indexed by
+task index inside `_search_region!`, so two live searches would have their chunks
+writing into the same workspaces.  Each slot in the pool owns one cache, which
+also amortises FFTW planning across the sweep.  Candidates are bit-identical to
+the sequential run.
 
 `-o`/`--outputfilenm`, `--plot` and `--plotstem` are rejected: each names a
 single output that a many-point sweep would clobber, and holding a whole sweep's
@@ -93,12 +108,24 @@ function demod_main(a)
         sigma = Symbol(a["sigma"]),
     )
     backend = resolve_backend(a)
-    # One cache for every grid point: the harmonic plans key on `(params,
-    # Nprof)` and the trial-grid phase tables on `r_lo`, none of which depends
-    # on the file -- but `r_lo = lofreq*T'` DOES move, since each point's remap
-    # lands on its own length, so the direct plans are rebuilt per point while
-    # the per-thread workspaces are not.
+    # A POOL of caches, one per concurrent slot, plus the sequential one.
+    #
+    # Concurrent searches must NOT share a `SearchCache`: its `Workspace`s are
+    # indexed by task index inside `_search_region!`, so two searches running at
+    # once would have their `@spawn`ed chunks writing into the same workspaces --
+    # a silent data race, not a slow path. One cache per slot fixes that AND
+    # amortises FFTW planning: the plans are built `nconc` times rather than once
+    # per grid point, which matters because `cache = nothing` re-plans every point.
+    nconc = _demod_concurrency(a, backend)
+    # Slot 1 is `cache` (the sequential one, reused when nconc == 1); the rest are
+    # extra slots. `Channel` is how `_demod_submit!` blocks when all are busy.
     cache = SearchCache()
+    caches = Channel{SearchCache}(nconc)
+    put!(caches, cache)
+    for _ in 2:nconc
+        put!(caches, SearchCache())
+    end
+    pending = Tuple{Task,AbstractString,Float64}[]
     plans = Dict{Int,Any}()          # FFTW rfft plans, keyed by the demodulated N
 
     npoints = length(points) * length(dats)
@@ -145,15 +172,123 @@ function demod_main(a)
                                             "pb=$(row[1]) x=$(row[2]) at=$(row[3])"
                 @info "Demodulated point" point="$done/$npoints" mode=mode grid=gridlabel N=Np T=ft.T file=outfile
 
-                a["outputfilenm"] = outfile
-                cands = search_one(ft, params, a, cache, backend)
-                write_candidates(cands, outfile, a["threshold"])
+                # The search is the dominant cost by ~2 orders of magnitude, so it
+                # runs on a task.  With the default concurrency of 1 this is the
+                # same call the sequential driver made; with more, several points
+                # search at once, each pinned to `maxthreads` threads.
+                if nconc == 1
+                    cands = search_one(ft, params, a, cache, backend;
+                                       maxthreads = 0, outfile = outfile)
+                    write_candidates(cands, outfile, a["threshold"])
+                else
+                    _demod_submit!(pending, caches, ft, params, a, backend, outfile,
+                                   ft.T, _demod_maxthreads(nconc), nconc)
+                end
             end
         end
+        # Drain. Any error inside a task is rethrown here, so a failure is not
+        # swallowed -- `wait` on a failed task raises rather than returning.
+        _demod_drain!(pending)
     finally
         # Returns device memory to the driver; a no-op on the CPU backend.  In a
         # `finally` so an error mid-sweep still releases, as in `main`.
         release_backend!(backend)
+    end
+    return nothing
+end
+
+"""
+    _demod_concurrency(a, backend) -> Int
+
+How many grid points to search at once, and how many workspaces to build for it.
+
+The whole point of the in-memory driver is that the observation is read **once**;
+the same argument applies to the work, so the pipeline is parallelised *inside*
+this process rather than by running one process per grid point (which would
+re-read the `.dat` and re-pay Julia's start-up per point).  Concurrency beats
+intra-point threading because a demodulation is serial -- ~25 ms during which
+every worker would otherwise idle -- and because the search's chunk parallelism
+flattens well below `nthreads()`.
+
+Default: `nthreads()`, capped so that each search still gets at least one thread
+and there are never more slots than points.  `--demod-concurrency 1` restores the
+purely sequential driver.
+"""
+function _demod_concurrency(a, backend)
+    nconc = Int(a["demod-concurrency"])
+    nconc == 0 && (nconc = nthreads())
+    nconc = max(1, min(nconc, nthreads()))
+    backend isa CPUBackend || (nconc = 1)   # the device is one resource
+    return nconc
+end
+
+# Threads each concurrent search may use.  With `nconc` slots and `nthreads()`
+# threads there is no fixed division that is always right, so the caller may pin
+# it; the default divides the pool, giving a single-threaded search per slot when
+# the two are equal -- which is the configuration that scales linearly.
+_demod_maxthreads(nconc) = nconc <= 1 ? 0 : max(1, nthreads() ÷ nconc)
+
+"""
+    _demod_submit!(pending, caches, ft, params, a, backend, outfile, T, maxthreads, nconc)
+
+Take a cache from the pool and run one grid point's search on a task, blocking
+while the pool is empty so that at most `nconc` searches are in flight.  The
+cache is returned to the pool in a `finally`, so a failed point does not leak its
+slot and stall the sweep.
+
+`pending` is held to `nconc` entries by draining a *completed* task whenever it
+reaches that size.  Without this the list would grow to one entry per grid point,
+keeping every point's `FTTFile` — and therefore its amplitude array, `N` complex
+words — alive until the end of the sweep, which is exactly the "peak memory
+independent of the grid size" property this driver exists for.  A 792-point
+sweep would pin ~0.5 GB that the sequential driver frees as it goes.
+"""
+function _demod_submit!(pending, caches, ft, params, a, backend, outfile, T,
+                        maxthreads, nconc)
+    # Drain first if the window is full: `take!` below cannot block on a slot
+    # whose holder is only waiting in this list, so the two must be kept in step.
+    length(pending) >= nconc && _demod_drain_one!(pending)
+    c = take!(caches)
+    t = Threads.@spawn begin
+        try
+            search_one(ft, params, a, c, backend; maxthreads = maxthreads, outfile = outfile)
+        finally
+            put!(caches, c)
+        end
+    end
+    push!(pending, (t, outfile, T))
+    return nothing
+end
+
+"""
+    _demod_drain_one!(pending)
+
+Collect the oldest in-flight grid point: wait for it, write its `.cohout`, and
+drop it from `pending`.  `fetch` rather than `wait`: `wait(t::Task)` returns
+`nothing` regardless of the task's value (it only raises on failure), so it would
+hand `write_candidates` a `Nothing`.  Both raise on a failed task, so a broken
+point aborts the sweep instead of silently producing no `.cohout`.
+
+Waiting oldest-first keeps the window at `nconc` in-flight points and lets the
+oldest `.cohout` land as soon as it is ready.  It can block on the oldest task
+while newer ones have already finished, but with every task bounded by one
+search that costs at most one search's tail.
+"""
+function _demod_drain_one!(pending)
+    t, outfile, T = popfirst!(pending)
+    write_candidates(fetch(t), outfile, T)
+    return nothing
+end
+
+"""
+    _demod_drain!(pending)
+
+Wait for every remaining in-flight grid point and write each one's candidates.
+Called once at the end of the sweep, after the per-point bounded drain above.
+"""
+function _demod_drain!(pending)
+    while !isempty(pending)
+        _demod_drain_one!(pending)
     end
     return nothing
 end

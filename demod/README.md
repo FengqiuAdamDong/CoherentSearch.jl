@@ -975,14 +975,41 @@ julia --project=. -t auto bin/coherent_search.jl OBS.dat \
   sift/combine tooling works unchanged.
 * `--rednoise-startwidth` / `--rednoise-endwidth` / `--rednoise-endfreq` pass
   PRESTO's rednoise knobs (defaults 6 / 100 / 6.0).
-* Demodulation is **sequential** and only the search is threaded: the search is
-  the dominant cost (~2.4 s of a ~2.7 s point at `--nharms 16`) and already
-  parallelises internally with `@spawn`, so overlapping demodulations would only
-  oversubscribe those threads.  `-t` controls the whole run.
+* **`--demod-concurrency N` searches N grid points at once** (0 = one slot per
+  Julia thread, 1 = the purely sequential driver).  Each concurrent search is
+  pinned to `nthreads()/N` threads.  This is the faster choice: a demodulation is
+  serial (~25 ms during which every worker otherwise idles) and the search's own
+  chunk parallelism flattens well below `nthreads()` — measured `-t 16`,
+  `--nharms 60`, 64 points: **14.6 s sequential vs 10.2 s concurrent (1.43x)**,
+  with the optimum at N ≈ `nthreads()` and the default within 3% of it.  At
+  `-t 32` on the same 64 points the curve is flat from 8 to 32 slots
+  (10.3/10.4/**10.0**/10.2/10.3 s), so the default is not a knife edge.  With
+  `N > 1` the demodulated points are searched on tasks and their `.cohout` files
+  written as each finishes, so ordering is not the grid order.
+  - **Each concurrent slot owns a separate `SearchCache`.**  Workspaces are
+    indexed by task index inside `_search_region!`, so two searches sharing one
+    would have their chunks writing into the same workspaces — a silent data
+    race.  A per-slot pool fixes that and also amortises FFTW planning across the
+    sweep.  Candidates are bit-identical to the sequential run (pinned by
+    `test/test_demod.jl`).
+  - **The observation is still read once, and Julia starts once.**  The parallel
+    axis is *inside* this process, deliberately not one process per grid point:
+    that alternative was measured at 1.06–1.13x (better scaling, but it re-reads
+    the `.dat` and re-pays ~0.85 s/point of start-up) and it costs real file
+    I/O.  See below.
 * The FFTW plan for each demodulated length is built with `FFTW.ESTIMATE`, not
   `MEASURE`: for `N = 6e6` those cost 15 ms and **35.5 s** respectively, and each
   grid point lands on its own length (`N'` varies per point by hundreds of
   samples) so `MEASURE` would be paid over and over.
+
+**Why not one process per grid point.**  `demod/run_nsns_sweep.sh` does exactly
+that (and `bin/parallel_search.py` for `.fft` files), and it does scale better
+per core.  It is the wrong trade here: measured against the in-process
+concurrent driver it wins only 1.06–1.13x, because it re-reads the `.dat` and
+re-pays Julia's start-up, plan building and wisdom import for every point
+(~0.85 s against a ~1.8 s point, where the in-process driver's fixed cost is
+paid once).  The `.dat` read itself is negligible (~0.11 ms warm for a 600 kB
+series) — it is the start-up that costs.
 
 **Agreement with the file-based chain.**  The same demodulated series run both
 ways gives the same best candidate; on a 1 s injected pulsar at `--nharms 16`

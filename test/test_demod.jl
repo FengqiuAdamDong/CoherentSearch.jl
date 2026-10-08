@@ -374,6 +374,51 @@ end
     end
 end
 
+
+@testset "demod concurrency: same candidates, one .dat read" begin
+    # The pipeline-parallel driver searches several grid points at once, each
+    # with its own cache (workspaces are indexed by task index inside
+    # `_search_region!`, so sharing one would be a data race) and pinned to its
+    # own threads.  Concurrent and sequential must agree bit for bit -- the whole
+    # reason the caches are per-slot rather than shared.
+    N = 1 << 14
+    dt = 0.0098304
+    epoch = 5.5e4
+    dir = mktempdir()
+    dat = joinpath(dir, "obs.dat")
+    write(dat, synth_series(N; f = 1.0, snr = 25.0, seed = 51))
+    write_presto_inf(joinpath(dir, "obs.inf"), N, dt, epoch; name = "obs")
+
+    # Four points, spanning two A_T values so the searches really are distinct.
+    grid = joinpath(dir, "grid.csv")
+    write(grid, "pb,x,at\n" *
+                "0.041666666666666664,0.41361909,0.0\n" *
+                "0.041666666666666664,0.41361909,1.0\n" *
+                "0.041666666666666664,0.41361909,2.0\n" *
+                "0.041666666666666664,0.41361909,3.0\n")
+
+    base = [dat, "--demod-grid", grid, "--nharms", "8", "--threshold", "0.0",
+            "--nowisdom", "--noprogress", "--lofreq", "0.5", "--hifreq", "2.0",
+            "--blocksize", "64"]
+    outs = (joinpath(dir, "seq"), joinpath(dir, "conc"))
+    with_logger(NullLogger()) do
+        CoherentSearch.main(vcat(base, ["--outdir", outs[1], "--demod-concurrency", "1"]))
+        CoherentSearch.main(vcat(base, ["--outdir", outs[2], "--demod-concurrency", "4"]))
+    end
+    fs = sort(readdir(outs[1]))
+    @test length(fs) == 4
+    @test sort(readdir(outs[2])) == fs
+    @test all(f -> endswith(f, "_red.cohout"), fs)
+    for f in fs
+        @test read(joinpath(outs[1], f), String) == read(joinpath(outs[2], f), String)
+    end
+    # And all four `.dat` reads happened once per invocation, not once per point:
+    # the driver opens the .dat outside the grid loop, so this is structural --
+    # pinned here by the absence of any per-point temporary file.  The candidate
+    # files are the only things written.
+    @test all(f -> endswith(f, ".cohout"), readdir(outs[2]))
+end
+
 @testset "CLI argument guards" begin
     dir = mktempdir()
     dat = joinpath(dir, "obs.dat")

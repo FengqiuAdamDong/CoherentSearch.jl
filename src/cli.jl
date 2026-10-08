@@ -40,6 +40,10 @@ function search_argtable!(s::ArgParseSettings)
             action = :append_arg
             arg_type = String
             default = String[]
+        "--demod-concurrency"
+            help = "Grid points searched at once under --demod-grid.  0 (the default) uses one slot per Julia thread, each search pinned to nthreads/slots threads -- so 16 points on 16 threads run 16 single-threaded searches concurrently.  This is faster than letting one search use every thread, because a demodulation is serial and the search's own chunk parallelism flattens well below nthreads().  1 restores the purely sequential driver.  The observation is still read ONCE either way; this is not one process per point"
+            arg_type = Int
+            default = 0
         "--rednoise-startwidth"
             help = "PRESTO rednoise -startwidth: initial window size in Fourier bins for the running-median normalisation.  Only used with --demod-grid"
             arg_type = Int
@@ -434,7 +438,8 @@ Search one FFT file with the parsed options `a`, reusing `cache`'s plans and
 workspaces, and return its top `--ncands` candidates best-metric first.
 """
 function search_one(ft::FFTFile, params::SearchParams, a, cache::SearchCache,
-                    backend::SearchBackend = CPUBackend())
+                    backend::SearchBackend = CPUBackend();
+                    maxthreads::Integer = 0, outfile::Union{Nothing,AbstractString} = nothing)
     @info "Searching" file=ft.path T=ft.T nharms=params.nharms decimations=params.decimations threads=nthreads() backend=nameof(typeof(backend))
 
     progress = a["noprogress"] ? :none : (a["progressbar"] ? :bar : :text)
@@ -453,14 +458,17 @@ function search_one(ft::FFTFile, params::SearchParams, a, cache::SearchCache,
                    normalize = a["normalize"], verbose = a["verbose"],
                    wisdom = !a["nowisdom"],
                    wisdom_file = isempty(a["wisdomfile"]) ? nothing : a["wisdomfile"],
-                   cache = cache, backend = backend)
+                   cache = cache, backend = backend, maxthreads = maxthreads)
     cands = backend isa CPUBackend ? _dosearch() : Base.invokelatest(_dosearch)
 
     if mstats !== nothing
         # Per-file stem, so a multi-file run does not overwrite one file's tables
-        # with the next one's.
-        base = isempty(a["outputfilenm"]) ?
-               first(splitext(basename(ft.path))) : a["outputfilenm"]
+        # with the next one's.  `outfile` is passed explicitly by the demod
+        # driver, which searches many points concurrently and so must not reach
+        # for the shared `a["outputfilenm"]` that a sibling task may be rewriting.
+        base = outfile !== nothing ? String(outfile) :
+               (isempty(a["outputfilenm"]) ?
+                first(splitext(basename(ft.path))) : a["outputfilenm"])
         report_metricstats(mstats, base, params, a["threshold"])
     end
 

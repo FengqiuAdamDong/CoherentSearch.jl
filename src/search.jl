@@ -2378,7 +2378,8 @@ function search(ft::FFTFile, params::SearchParams=SearchParams();
                 normalize::Bool=false, verbose::Bool=false,
                 wisdom::Bool=true, wisdom_file::Union{Nothing,AbstractString}=nothing,
                 cache::Union{Nothing,SearchCache}=nothing,
-                backend::SearchBackend=CPUBackend())
+                backend::SearchBackend=CPUBackend(),
+                maxthreads::Integer=0)
     progress in (:none, :text, :bar) ||
         throw(ArgumentError("progress must be :none, :text or :bar, got :$progress"))
     _check_sigma(params)
@@ -2424,6 +2425,12 @@ function search(ft::FFTFile, params::SearchParams=SearchParams();
     # CPU computation and must stay so: its whole job is to check the analytic
     # scale against a MEASURED one.
     nt = backend isa CPUBackend ? max(1, min(nthreads(), nchunks)) : 1
+    # `maxthreads` caps that, so a caller driving several searches CONCURRENTLY
+    # (one Julia task per grid point, say) can pin each to a slice of the
+    # machine instead of having every one of them spawn `nthreads()` tasks into
+    # the same pool.  0 means "no cap", which is the default and leaves the
+    # single-search behaviour above exactly as it was.
+    maxthreads > 0 && (nt = min(nt, Int(maxthreads)))
     # The GPU wants a chunk of ~10^5 trials; the CPU host workspace exists only
     # for `_sigma_sanity_check`, which is a property of the DATA and needs no such
     # thing.  Sizing it to the GPU's `Nprof` allocated hundreds of MB, planned
