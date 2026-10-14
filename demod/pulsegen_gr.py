@@ -317,10 +317,11 @@ def build_parser():
                        help="Companion mass [Msun].")
     g_orb.add_argument("-pulsar_mass", type=float, default=1.4,
                        help="Pulsar mass [Msun].")
-    g_orb.add_argument("-anchor", choices=("start", "midpoint"), default="start",
+    g_orb.add_argument("-anchor", choices=("start", "midpoint"), default="midpoint",
                        help="Reference epoch for p0, A_T and the delays: "
-                            "'start' = the .inf epoch (first sample), "
-                            "'midpoint' = obs start + T/2.")
+                            "'midpoint' = obs start + T/2 (default; matches the "
+                            "circular grid's A_T convention), 'start' = the "
+                            ".inf epoch (first sample).")
     g_orb.add_argument("-fit_anchor", choices=("start", "midpoint"),
                        default="midpoint",
                        help="Epoch the reported best-fit accel/jerk/snap "

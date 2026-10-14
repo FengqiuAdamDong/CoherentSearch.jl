@@ -199,10 +199,10 @@ end
 
 @testset "demodulate_series: anchor convention" begin
     # The anchor is load-bearing (a wrong one moved a recovered S/N from 40.8 to
-    # 8.0).  `anchor = "start"` shifts the circular A_T from the observation
-    # midpoint back to the .inf epoch by T/2, so the two anchors must give
-    # genuinely different series, and "start" must recover a signal injected
-    # with pulsegen's default anchor.
+    # 8.0).  The default is now "midpoint": A_T is the mean anomaly at the
+    # observation midpoint, matching the circular grid's convention.
+    # `anchor = "start"` shifts that phase back to the .inf epoch by T/2, so the
+    # two anchors must give genuinely different series.
     N = 1 << 14
     dt = 0.0098304
     epoch = 5.5e4
@@ -216,9 +216,10 @@ end
     # And `sin_i` derives x through `projected_x`, matching the explicit value
     # pulsegen/nsns_grid use for this orbit.
     @test isapprox(projected_x(3600.0, 0.5, 1.4, 1.4), 0.4136190886666235; rtol = 1e-12)
-    s_sini, _ = demodulate_series(x, dt, epoch;
-                                  pb = common.pb, sin_i = 0.5, A_T = common.A_T)
-    @test s_sini == s_start
+    # Default (no anchor kwarg) must be the midpoint convention.
+    s_default, _ = demodulate_series(x, dt, epoch;
+                                     pb = common.pb, sin_i = 0.5, A_T = common.A_T)
+    @test s_default == s_mid
 end
 
 @testset "read_demod_grid / demod_point_stem" begin

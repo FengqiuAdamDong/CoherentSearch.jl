@@ -112,7 +112,9 @@ orders until the next order's peak contribution over `tau` is below
 function _exact_remap_poly(accel, jerk, snap, tau, tsamp;
                            tol_samples = RESAMPLE_TOL_SAMPLES,
                            max_order = RESAMPLE_MAX_ORDER, v0 = 0.0)
-    v = -_velocity_poly(accel, jerk, snap; v0 = v0)   # v_inj = -(trial as given)
+    # v = -(trial as given), so the plain sum tau + sum_n integral (v/c)^n below is
+    # integral dtau/(1 + v_trial/c): the remap that cancels a receding (v > 0) trial.
+    v = -_velocity_poly(accel, jerk, snap; v0 = v0)
     if length(v) == 1 && v[1] == 0.0                  # all-zero
         return [0.0, 1.0], 0, true
     end
@@ -295,12 +297,16 @@ end
 Injected-sign LOS Doppler of a pure Keplerian circular orbit (e = 0, Roemer
 only, no GR), as a function of `tau` measured from the data-midpoint anchor:
 
-    delay  Δ(t) = x*sin(ω_b*t + A_T),      x = a_p sin(i)/c  [light-seconds]
-    v/c         = dΔ/dt = x*ω_b*cos(ω_b*t + A_T)
+    delay  Δ(τ) = x*sin(ω_b*(τ + t_offset_s) + A_T),   x = a_p sin(i)/c [light-s]
+    v/c         = dΔ/dτ = x*ω_b*cos(ω_b*(τ + t_offset_s) + A_T)
+
+with `A_T` the mean anomaly at the epoch `t_offset_s` from the midpoint: 0
+(midpoint, the default) for `anchor="midpoint"`, `+T/2` for `"start"`.
 
 `t_offset_s` shifts the midpoint anchor to the epoch at which `A_T` is defined
-(`pulsegen_gr.py -anchor`): T/2 for `start` (the .inf epoch, pulsegen's
-default), 0 for `midpoint`.  `A_T` absorbs the (degenerate, for e = 0)
+(`pulsegen_gr.py -anchor`): 0 for `midpoint` (the default everywhere, so the
+grid's omega_b lever is T/2), T/2 for `start` (the .inf epoch; kept for
+injections that anchor there).  `A_T` absorbs the (degenerate, for e = 0)
 argument of periastron.
 """
 function circular_voc(x_lt_s, pb_s, A_T; t_offset_s = 0.0)
@@ -543,7 +549,7 @@ end
 
 """
     demodulate_series(raw, dt, epoch; accel=0.0, jerk=0.0, snap=0.0, v0=0.0,
-                      pb=nothing, x=nothing, A_T=0.0, anchor="start",
+                      pb=nothing, x=nothing, A_T=0.0, anchor="midpoint",
                       sin_i=nothing, companion_mass=1.4, pulsar_mass=1.4)
         -> (Vector{Float32}, Float64)
 
@@ -559,20 +565,22 @@ Two mutually exclusive models:
   * accel/jerk/snap/v0 -- exact polynomial remap (the default);
   * circular orbit -- pass `pb` [days] and either `x` [light-seconds] or
     `sin_i` (+ `companion_mass`/`pulsar_mass` to derive x), with `A_T` [rad]
-    the mean anomaly at `anchor` ("start" = the .inf epoch, pulsegen's
-    default; "midpoint" = obs midpoint).
+    the mean anomaly at `anchor` ("midpoint" = obs midpoint, the default and
+    the convention the circular grid is generated with; "start" = the .inf
+    epoch, pulsegen's old default).
 
 The anchor convention is load-bearing and was measured: the polynomial remap is
 anchored at the **midpoint** (`epoch + 0.5*N*dt`) and the circular `A_T` is
-shifted from the midpoint back to the `.inf` epoch by `T/2`.  Getting it wrong
-moved a recovered S/N from 40.8 to 8.0.  The returned length is per-point (the
-remap's own length, minus one sample when it lands odd, since PRESTO's
-`realfft` needs an even count), so everything file-scaled -- `T`, `r_lo =
-lofreq*T`, Nyquist -- must be recomputed per grid point.
+**also** defined at that midpoint by default.  The two anchors differ by a `T/2`
+phase shift (`anchor="start"` shifts the midpoint back to the `.inf epoch`);
+getting it wrong moved a recovered S/N from 40.8 to 8.0.  The returned length is
+per-point (the remap's own length, minus one sample when it lands odd, since
+PRESTO's `realfft` needs an even count), so everything file-scaled -- `T`,
+`r_lo = lofreq*T`, Nyquist -- must be recomputed per grid point.
 """
 function demodulate_series(raw::Vector{Float32}, dt::Real, epoch::Real;
                            accel = 0.0, jerk = 0.0, snap = 0.0, v0 = 0.0,
-                           pb = nothing, x = nothing, A_T = 0.0, anchor = "start",
+                           pb = nothing, x = nothing, A_T = 0.0, anchor = "midpoint",
                            sin_i = nothing, companion_mass = 1.4, pulsar_mass = 1.4)
     N = length(raw)
     # Zero-mean before resampling.  The remap can leave a few sample holes
@@ -599,9 +607,10 @@ function demodulate_series(raw::Vector{Float32}, dt::Real, epoch::Real;
             sin_i === nothing && error("circular demod needs --x or --sini")
             x_lt_s = projected_x(pb_s, sin_i, companion_mass, pulsar_mass)
         end
-        # A_T is the mean anomaly at `anchor`; the remap's tau is measured from
-        # the data-midpoint, so shift the midpoint back to that epoch.  The
-        # midpoint is at epoch + N/2*dt, i.e. tau = +T/2 relative to the start.
+        # A_T is the mean anomaly at `anchor`.  The remap's tau is measured from
+        # the data midpoint, so tau already is t - T/2: `midpoint` (the
+        # default) needs no shift, and `start` (A_T at the .inf epoch) shifts
+        # the midpoint back by T/2 = N/2*dt.
         t_offset_s = anchor == "start" ? 0.5 * N * dt : 0.0
         ts_new, tstart_new = resample_ts_shift_voc(
             ts, circular_voc(x_lt_s, pb_s, A_T; t_offset_s = t_offset_s),

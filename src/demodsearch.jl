@@ -173,8 +173,9 @@ function demod_main(a)
                 @info "Demodulated point" point="$done/$npoints" mode=mode grid=gridlabel N=Np T=ft.T file=outfile
 
                 # The search is the dominant cost by ~2 orders of magnitude, so it
-                # runs on a task.  With the default concurrency of 1 this is the
-                # same call the sequential driver made; with more, several points
+                # runs on a task.  With concurrency 1 (`--demod-concurrency 1`, or
+                # `--gpu`) this is the same call the sequential driver made; with
+                # more (default: `nthreads()`), several points
                 # search at once, each pinned to `maxthreads` threads.
                 if nconc == 1
                     cands = search_one(ft, params, a, cache, backend;
@@ -210,9 +211,9 @@ intra-point threading because a demodulation is serial -- ~25 ms during which
 every worker would otherwise idle -- and because the search's chunk parallelism
 flattens well below `nthreads()`.
 
-Default: `nthreads()`, capped so that each search still gets at least one thread
-and there are never more slots than points.  `--demod-concurrency 1` restores the
-purely sequential driver.
+Default: `nthreads()`, capped at `nthreads()` so that each search still gets at
+least one thread.  `--demod-concurrency 1` restores the purely sequential driver,
+and `--gpu` forces it (the device is one resource).
 """
 function _demod_concurrency(a, backend)
     nconc = Int(a["demod-concurrency"])
@@ -294,13 +295,16 @@ function _demod_drain!(pending)
 end
 
 # One grid row's remap parameters.  The row is the literal CSV text, so the
-# conversion happens here and the filename still matches the CSV.
+# conversion happens here and the filename still matches the CSV.  The circular
+# grid's `at` is the mean anomaly at the observation midpoint, so the demod is
+# driven with anchor="midpoint" (the nsns_grid.py convention; see
+# derive_circular_grid).
 function _grid_kwargs(mode::Symbol, row)
     if mode == :ajs
         return (accel = parse(Float64, row[1]), jerk = parse(Float64, row[2]),
                 snap = parse(Float64, row[3]))
     else
         return (pb = parse(Float64, row[1]), x = parse(Float64, row[2]),
-                A_T = parse(Float64, row[3]))
+                A_T = parse(Float64, row[3]), anchor = "midpoint")
     end
 end

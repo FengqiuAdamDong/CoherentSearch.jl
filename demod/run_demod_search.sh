@@ -33,7 +33,8 @@
 #
 # Requires: julia (+ the CoherentSearch.jl project), a Python with numpy/scipy/
 # matplotlib/yaml (the pixi/anaconda env carrying FFA_stacking's deps), and
-# PRESTO's realfft + rednoise on PATH (or REALFFT/REDNOISE set).
+# PRESTO's realfft + rednoise.  PYTHON/REALFFT/REDNOISE default to the
+# /home/fadong/anaconda3/bin copies, not PATH; set them on another host.
 
 set -euo pipefail
 
@@ -42,15 +43,15 @@ set -euo pipefail
 # --------------------------------------------------------------------------
 # MODE=circular demodulates with the exact circular-orbit remap (pb,x,A_T),
 # matching a pure Keplerian injection (e=0, omega_peri absorbed by A_T).  It
-# reuses the same injection; it just bypasses the accel/jerk/snap grid and
-# takes the truth's (pb, x, A_T) directly.  MODE=ajs (default) keeps the
-# original nearest-ajs-grid-point behaviour.
+# reuses the same injection, derives the circular grid for the injected orbit
+# and demodulates at the point nearest the truth.  MODE=ajs (default) does the
+# same with the accel/jerk/snap grid.
 : "${MODE:=ajs}"
 : "${PB_DAYS:=0.041666666666666664}"  # orbital period [days]; default 1 hour
 : "${E:=0}"                           # eccentricity
 : "${SIN_I:=0.5}"                     # sin(inclination)
 : "${OMEGA_PERI:=0.3}"                # argument of periastron [rad]
-: "${A_T:=0}"                         # mean anomaly at the epoch [rad]
+: "${A_T:=0}"                         # mean anomaly at the obs midpoint [rad]
 
 : "${P0:=1.0}"                        # intrinsic spin period [s]
 : "${PDOT:=0}"                        # intrinsic period derivative [s/s]
@@ -138,7 +139,7 @@ TRUTH="$OUTDIR/${OUTBASE}_truth.yaml"
 # --------------------------------------------------------------------------
 if [ "$MODE" = "circular" ]; then
     GRID_ARGS=(-inf "$INJ_INF" -outdir "$GRIDDIR" -outstem "$GRIDNAME"
-               -mode circular -p0 "$P0" -drop_pct "$DROPPCT"
+               -mode circular -p0 "$P0"
                -phase_tol_cycles "$PHASE_TOL" -p_o "$PO_YEARS" -sin_i "$SIN_I")
 else
     GRID_ARGS=(-inf "$INJ_INF" -outdir "$GRIDDIR" -outstem "$GRIDNAME"

@@ -4,11 +4,12 @@
 #
 #   MODE=ajs (default) -- accel/jerk/snap grid (demod/nsns_grid.py, a copy of
 #     FFA_stacking/orbit_simulation/kinematic_grid_spacing.py specialised to a
-#     30 min - 10 d NS-NS orbit).  Each point writes
+#     NS-NS orbit; default ladder 2 min - 1 d).  Each point writes
 #     <INBASE>_demod_a{A}_j{J}_s{S}.*.
-#   MODE=circular -- pure Keplerian circular-orbit grid (pb,x,at, uniform in
-#     omega_b, x, A_T; no cubic-truncation gate since the demod is exact at the
-#     truth, so -drop_pct drops the highest-x orbits first).  Each point writes
+#   MODE=circular -- pure Keplerian circular-orbit grid (pb,x,at; one sub-grid
+#     per period band, checkerboard in (omega_b, A_T) per x row; no
+#     cubic-truncation gate since the demod is exact at the truth, and nothing
+#     is dropped: -drop_pct is ajs-only).  Each point writes
 #     <INBASE>_demod_pb{Pb}_x{X}_at{A_T}.*.
 #   MODE=hybrid -- circular below p_break and ajs at/above it, combining the two
 #     regimes.  p_break is the shortest scanned p_o such that every p_o at/above
@@ -36,14 +37,6 @@
 # BLOCKSIZE overrides --blocksize; empty uses coherent_search.jl's per-backend
 # default.
 #
-# GPU: set GPU=1 to pass --gpu to the search.  CUDA is a weak dependency, so
-# point GPU_PROJECT at a Julia environment carrying CUDA.jl (see the README's
-# "Installing CUDA.jl"; bench/gpu_probe_setup.sh builds one).  GPU=1 ignores
-# NPROC: every point is prepared (realfft + rednoise) and then ALL the _red.fft
-# files go to a single coherent_search.jl invocation, so CUDA loads once.
-# BLOCKSIZE overrides --blocksize; empty uses coherent_search.jl's per-backend
-# default.
-#
 # Everything is configured through environment variables; see the defaults
 # below.  The grid is derived from -phase_tol_cycles (the accumulated phase
 # drift budget over the observation); run `python nsns_grid.py -h` for the
@@ -52,14 +45,15 @@
 #   bash demod/run_nsns_sweep.sh
 #   INF=/path/obs.inf NPHASE=20 NSAMP=1000 bash demod/run_nsns_sweep.sh
 #   GRID_CSV=/path/to/grid.csv bash demod/run_nsns_sweep.sh   # skip derivation
-#   MODE=circular DROPPCT=50 bash demod/run_nsns_sweep.sh     # circular sweep
+#   MODE=circular bash demod/run_nsns_sweep.sh                # circular sweep
 #   MODE=hybrid bash demod/run_nsns_sweep.sh                  # circular + ajs
 #   MODE=hybrid P_BREAK=0.02 bash demod/run_nsns_sweep.sh     # manual p_break [yr]
 #   GPU=1 GPU_PROJECT=~/gpuenv bash demod/run_nsns_sweep.sh   # NVIDIA P40
 #
 # Requires: julia (+ the CoherentSearch.jl project), a Python with numpy/scipy/
 # matplotlib/yaml (the pixi/anaconda env carrying FFA_stacking's deps), and
-# PRESTO's realfft + rednoise on PATH (or REALFFT/REDNOISE set).
+# PRESTO's realfft + rednoise.  PYTHON/REALFFT/REDNOISE default to the
+# /home/fadong/anaconda3/bin copies, not PATH; set them on another host.
 
 set -euo pipefail
 
@@ -86,8 +80,8 @@ set -euo pipefail
 # GPU (NVIDIA P40 or any CUDA card): GPU=1 passes --gpu to coherent_search.jl.
 # CUDA is a weak dep, so GPU_PROJECT must name a Julia env that has it (default:
 # the repo project, which works if you added CUDA there despite the advice not
-# to).  One GPU is shared by every search process, so GPU=1 defaults NPROC to 1.
-: "${GPU:=1}"
+# to).  Default off (empty); GPU=1 ignores NPROC and runs one search.
+: "${GPU:=}"
 : "${GPU_PROJECT:=}"
 : "${BLOCKSIZE:=}"                   # --blocksize; empty = per-backend default
 
@@ -100,7 +94,7 @@ set -euo pipefail
 : "${ECC:=}"                          # eccentricities
 : "${SINI:=}"                         # sin(inclination)
 : "${OMEGA_PERI:=}"                   # arguments of periastron [rad]
-: "${DROPPCT:=10}"                    # % of feasible segments to discard
+: "${DROPPCT:=10}"                    # % of feasible segments to discard (ajs/hybrid)
 : "${PHASE_TOL:=0.1}"                 # accumulated-phase budget [cycles]
 : "${NPHASE:=120}"                    # segment start phases scanned per orbit
 : "${NSAMP:=4000}"                    # time samples per span for the fits
@@ -123,7 +117,7 @@ set -euo pipefail
 # the repo project (works only if CUDA was added there, against upstream advice).
 SEARCH_PROJECT="$COH_REPO"
 SEARCH_FLAGS=()
-if [ -n "$GPU" ]; then
+if [ "$GPU" = 1 ]; then
     : "${GPU_PROJECT:=$COH_REPO}"
     SEARCH_PROJECT="$GPU_PROJECT"
     SEARCH_FLAGS=(--gpu)
@@ -157,10 +151,11 @@ if [ -n "$GRID_CSV" ]; then
     echo ">> using caller-supplied grid $GRID_CSV"
 else
     GRID_ARGS=(-inf "$INF" -outdir "$GRIDDIR" -outstem "$GRIDNAME"
-               -p0 "$P0" -drop_pct "$DROPPCT" -mode "$MODE")
+               -p0 "$P0" -mode "$MODE")
+    [ "$MODE" = "circular" ] || GRID_ARGS+=(-drop_pct "$DROPPCT")
     if [ "$MODE" = "circular" ]; then
-        # Circular grid: only (p_o, sin_i, drop_pct, phase_tol) apply; no
-        # e/omega_peri/caps/terms.
+        # Circular grid: only (p_o, sin_i, phase_tol) apply; no
+        # e/omega_peri/caps/terms/drop_pct.
         [ -n "$PO" ]   && GRID_ARGS+=(-p_o $PO)
         [ -n "$SINI" ] && GRID_ARGS+=(-sin_i $SINI)
         GRID_ARGS+=(-phase_tol_cycles "$PHASE_TOL")
@@ -322,7 +317,7 @@ run_one() {
     fi
 }
 
-if [ -n "$GPU" ]; then
+if [ "$GPU" = 1 ]; then
     # Serial prepare, then ONE search over every _red.fft (single CUDA load).
     echo ">> preparing $NPOINTS point(s): realfft + rednoise (serial)"
     rc=0
@@ -356,10 +351,10 @@ else
     echo ">> searching $NPOINTS point(s), $NPROC concurrent x -t $NTHREADS"
     rc=0
     declare -A pids=()
-    reap_ok() {  # block until any one point finishes; record its success
+    reap_ok() {  # block until any one point finishes; latch any failure
         local pid
         for pid in "${!pids[@]}"; do
-            if wait "$pid" 2>/dev/null; then rc=0; else rc=1; fi
+            wait "$pid" 2>/dev/null || rc=1
             unset 'pids[$pid]'
             return
         done

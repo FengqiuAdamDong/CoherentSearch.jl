@@ -64,7 +64,7 @@ end
 
 """
     demod_file(input, output; accel, jerk, snap, v0=0.0,
-               pb=nothing, x=nothing, A_T=0.0, anchor="start",
+               pb=nothing, x=nothing, A_T=0.0, anchor="midpoint",
                sin_i=nothing, companion_mass=1.4, pulsar_mass=1.4) -> (n_in, n_out)
 
 Apply the remap to `input` and write `output` (+ beside it, an updated `.inf`).
@@ -74,11 +74,11 @@ Two mutually exclusive models:
   * accel/jerk/snap/v0 -- exact polynomial remap (the default);
   * circular orbit -- pass `pb` [days] and either `x` [light-seconds] or
     `sin_i` (+ `companion_mass`/`pulsar_mass` to derive x), with `A_T` [rad]
-    the mean anomaly at `anchor` ("start" = the .inf epoch, pulsegen's
-    default; "midpoint" = obs midpoint).
+    the mean anomaly at `anchor` ("midpoint" = obs midpoint, the default and
+    the nsns_grid.py convention; "start" = the .inf epoch).
 """
 function demod_file(input, output; accel = 0.0, jerk = 0.0, snap = 0.0, v0 = 0.0,
-                    pb = nothing, x = nothing, A_T = 0.0, anchor = "start",
+                    pb = nothing, x = nothing, A_T = 0.0, anchor = "midpoint",
                     sin_i = nothing, companion_mass = 1.4, pulsar_mass = 1.4)
     infpath = replace(input, r"\.dat$" => ".inf")
     outinf = replace(output, r"\.dat$" => ".inf")
@@ -102,16 +102,23 @@ end
 
 function demod_main(args)
     isempty(args) && error("usage: demod_dat.jl IN.dat OUT.dat " *
-                           "--accel A --jerk J --snap S  |  --pb P --x X --a-t A")
+                           "--accel A --jerk J --snap S  |  --pb P --x X --a-t A " *
+                           "[--a-t-anchor midpoint|start]  (default midpoint)")
     input = args[1]
     output = args[2]
     accel = 0.0; jerk = 0.0; snap = 0.0; v0 = 0.0
-    pb = nothing; x = nothing; A_T = 0.0; anchor = "start"
+    pb = nothing; x = nothing; A_T = 0.0; anchor = "midpoint"
     sin_i = nothing; companion_mass = 1.4; pulsar_mass = 1.4
     i = 3
     while i <= length(args)
         a = args[i]
-        val = i < length(args) ? parse(Float64, args[i+1]) : error("$a needs a value")
+        i < length(args) || error("$a needs a value")
+        if a == "--a-t-anchor"
+            anchor = args[i+1]
+            i += 2
+            continue
+        end
+        val = parse(Float64, args[i+1])
         if a == "--accel" || a == "-a"
             accel = val
         elseif a == "--jerk" || a == "-j"
@@ -132,8 +139,6 @@ function demod_main(args)
             companion_mass = val
         elseif a == "--pulsar-mass"
             pulsar_mass = val
-        elseif a == "--a-t-anchor"
-            anchor = args[i+1]
         else
             error("unknown option $a")
         end

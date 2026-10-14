@@ -12,7 +12,8 @@
 #   accel,jerk,snap -> polynomial remap; each row writes
 #     OUTDIR/NAME_demod_a{A}_j{J}_s{S}.dat + .inf
 #   pb,x,at         -> circular orbit; x is a_p sin(i)/c [light-s], at is A_T
-#     [rad] at the .inf epoch; each row writes
+#     [rad] at the observation midpoint (the nsns_grid.py convention); each
+#     row writes
 #     OUTDIR/NAME_demod_pb{Pb}_x{X}_at{A_T}.dat + .inf
 #
 # Literal CSV strings are used for filenames (not reformatted numbers), so the
@@ -58,7 +59,8 @@ function main(args)
                            jerk = parse(Float64, row[2]), snap = parse(Float64, row[3]))
             else
                 demod_file(input, out; pb = parse(Float64, row[1]),
-                           x = parse(Float64, row[2]), A_T = parse(Float64, row[3]))
+                           x = parse(Float64, row[2]), A_T = parse(Float64, row[3]),
+                           anchor = "midpoint")
             end
         end
         total += length(rows)

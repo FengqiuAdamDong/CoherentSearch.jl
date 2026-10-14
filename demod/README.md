@@ -45,7 +45,9 @@ The pipeline is:
 * **`-mode circular`**: a pure-Keplerian **circular-orbit** grid in
   `(ω_b, x, A_T)`. The circular demod removes the exact non-polynomial Roemer
   track, so at the true parameters the residual is zero and there is no
-  truncation gate; the only error is grid-point mismatch.
+  truncation gate; the only error is grid-point mismatch. The budget bounds
+  the mismatch phase the spin-frequency search **cannot** absorb (§5.6), so
+  orbits not much shorter than the observation get much coarser steps.
 * **`-mode hybrid`**: circular below `p_break` and ajs at/above it, combining the
   two regimes (Section 6). The exact circular demod is the better short-orbit
   search; the cubic is the general, cheaper long-orbit search. `p_break` is
@@ -81,7 +83,7 @@ Everything below uses these symbols. Code names are in `monospace`.
 | $e$ | `e` | orbital eccentricity (scanned) |
 | $\sin i$ | `sin_i` | sine of orbital inclination (scanned) |
 | $\omega_\text{peri}$ | `omega_peri` | argument of periastron [rad] (scanned) |
-| $A_T$ | `A_T` | mean anomaly at epoch [rad] (fixed at 0 in the ajs scan) |
+| $A_T$ | `A_T` | mean anomaly [rad] at the observation **midpoint** (circular model); in the ajs scan, `-A_T` (default 0) at the scan's t = 0, immaterial there since t0 sweeps a full orbit |
 | $m_c$ | `companion_mass` | companion mass [$M_\odot$], default 1.4 |
 | $m_p$ | `pulsar_mass` | pulsar mass [$M_\odot$], default 1.4 |
 | $M$ | | total mass $m_c+m_p$ [$M_\odot$] |
@@ -127,6 +129,8 @@ constants):
 -mode            ajs     (ajs | circular | hybrid)
 -break_coverage  60.0    (hybrid auto-p_break threshold [%])
 -p_break         None    (hybrid: manual switch period [yr])
+-circ_strict     off     (circular/hybrid: bound the raw max|R|, §5.6)
+-no_write        off     (derive + report only; write no CSV/YAML/plots)
 ```
 
 > The module docstring says "30 minutes out to 10 days"; that is stale. The
@@ -176,13 +180,14 @@ absorbs into its $a$ coefficient.
 For a **circular** orbit ($e=0$, Roemer only, no GR) the delay is a pure sinusoid,
 
 $$
-\Delta(t) = x\\,\sin(\omega_b t + A_T),
+\Delta(t) = x\\,\sin\!\bigl(\omega_b (t-T/2) + A_T\bigr),
 \qquad
-\frac{v_\text{los}(t)}{c} = \dot\Delta(t) = x\\,\omega_b\cos(\omega_b t+A_T),
+\frac{v_\text{los}(t)}{c} = \dot\Delta(t) = x\\,\omega_b\cos\!\bigl(\omega_b (t-T/2)+A_T\bigr),
 $$
 
-where $x=a_p\sin i/c$ is in light-seconds (so $\Delta$ is in seconds). This is the
-track the `circular` mode removes exactly (`circular_voc` in
+with $t$ measured from the observation start and $A_T$ the mean anomaly at the
+**midpoint** (Section 3); $x=a_p\sin i/c$ is in light-seconds (so $\Delta$ is in
+seconds). This is the track the `circular` mode removes exactly (`circular_voc` in
 `src/demod.jl`).
 
 ### 2.2 Why phase error is measured in metres
@@ -244,16 +249,21 @@ u(\tau) \\;=\\; \tau - \frac{1}{c}\\!\int v_\text{inj}
       - \frac{1}{c^3}\\!\int v_\text{inj}^3 + \cdots
 $$
 
-The resampler substitutes $v_\text{inj} = -v$, where
+with $v_\text{inj} = v$, where
 $v(\tau) = v_0 + a\tau + \tfrac{j}{2}\tau^2 + \tfrac{s}{6}\tau^3$ is the cubic with
-the **trial coefficients as given** (`_velocity_poly`). The sign flip cancels the
-series alternation, so all terms add:
+the **trial coefficients as given** (`_velocity_poly`), positive receding (the
+grid fits $v = c\,(p_\text{obs}/p_0-1)$). The code builds $w=-v$ and sums
+$\tau+\sum_n\int w^n/c^n$, which is the same alternating series:
 
 $$
-u(\tau) \\;=\\; \tau + \frac{1}{c}\\!\int v
+u(\tau) \\;=\\; \int_0^\tau\frac{d\tau'}{1+v/c}
+      \\;=\\; \tau - \frac{1}{c}\\!\int v
       + \frac{1}{c^2}\\!\int v^2
-      + \frac{1}{c^3}\\!\int v^3 + \cdots
+      - \frac{1}{c^3}\\!\int v^3 + \cdots
 $$
+
+A receding pulsar's clock runs slow by $(1+v/c)$; dividing it out cancels the
+drift. The circular remap (`circular_voc`) uses the same sign.
 
 Orders are added until the next order's peak contribution over the span is below
 `RESAMPLE_TOL_SAMPLES = 0.1` samples (up to `RESAMPLE_MAX_ORDER = 8`). Because
@@ -268,11 +278,16 @@ $[\min(0,\tau),\max(0,\tau)]$, quadrupling the sample count (from 4000, capped a
 **Anchor.** `demodulate_series` anchors the polynomial at the **midpoint** of the input
 series (`reference_mjd = epoch + 0.5 N dt`), which is why the grid's default
 `-anchor midpoint` matches it. For the circular model, `A_T` is the mean anomaly
-at the **start** (the `.inf` epoch, matching `pulsegen_gr.py -anchor start`); the
-code shifts the midpoint back to the start by `t_offset_s = T/2`
-(`0.5*N*dt`). The ajs grid's `midpoint`/`start` choice must match the anchor the
-demod uses, or the fitted coefficients refer to the wrong origin. `start` is kept
-only for comparison.
+at that same **midpoint** (obs start + `T/2`): the circular grid, the grid
+driver and `pulsegen_gr.py` all use `anchor="midpoint"` by default, and the
+remap's `tau` is already measured from the midpoint, so `t_offset_s = 0`. The
+legacy `start` anchor (the `.inf` epoch) shifts `A_T` back by `t_offset_s =
+T/2` (`0.5*N*dt`) and is kept only for injections/comparison. The polynomial demod is **always**
+midpoint-anchored (`demodulate_series` ignores `anchor` there), so an ajs grid
+derived with `-anchor start` is for comparison only and is not valid demod
+input: its coefficients refer to the wrong origin. The midpoint is also what keeps the
+circular `omega_b` lever at `T/2` instead of `T` (Section 5.4), halving the
+dominant axis.
 
 ---
 
@@ -305,7 +320,7 @@ The design matrix has a column of ones ($v_0$, always fitted) followed by the
 columns $\tau^{k+1}/k!$ for the masked axes ($k=0,1,2$ for accel, jerk, snap;
 `FACTORIALS = [1,2,6]`). Columns are divided by their max abs value for
 conditioning, `lstsq` solves, and the coefficients are un-scaled. The fit returns
-the max instantaneous residual `trunc` (m/s, used only for reporting) and the
+the max instantaneous residual `trunc` (m/s; stored in the record, not used downstream) and the
 **integrated** truncation
 
 $$
@@ -331,9 +346,11 @@ $$
 \Lambda < \varepsilon_m \qquad (\texttt{trunc\\_phase} < \texttt{phase\\_tol\\_m}).
 $$
 
-No grid density can repair a truncation larger than the budget — the cubic is the
-best possible template on that segment — so infeasible segments are simply not
+No grid density can repair a truncation larger than the budget, so infeasible segments are simply not
 claimed by the grid.
+The cubic is the least-squares fit to the segment's *velocity*, not the
+minimax fit on $\Lambda$, so the gate is conservative: it can reject a segment
+that some other cubic would pass, never the reverse.
 
 ### 4.3 Step 3 — caps
 
@@ -555,9 +572,10 @@ changes; the formulas do not.)
 The circular demod removes the exact Roemer track
 $\Delta=x\sin(\omega_b t + A_T)$, which is not a polynomial. At the true
 $(x,\omega_b,A_T)$ the residual is zero, so there is no residual "truncation" to
-gate on. Every scanned orbit is feasible, and `-drop_pct` is the only cost
-control. The only error at a grid point is the **parameter mismatch** between
-truth and grid.
+gate on. Every orbit is feasible and **nothing is dropped** (`-drop_pct` is
+ajs-only): the cost knob is the budget $\varepsilon$ itself, and the count
+scales as $\varepsilon^{-3}$ in every band. The only error at a grid point is
+the **parameter mismatch** between truth and grid.
 
 ### 5.2 The residual spin phase
 
@@ -565,24 +583,25 @@ The orbit-induced residual spin phase (cycles) — the quantity the budget bound
 is the difference of the delays over $p_0$:
 
 $$
-\Phi(t) \\;=\\; \frac{x}{p_0}\sin(\omega_b t + A_T),
+\Phi(t) \\;=\\; \frac{x}{p_0}\sin\!\bigl(\omega_b (t - T/2) + A_T\bigr),
 \qquad t\in[0,T],
 $$
 
-with $t$ the **absolute** time since the observation start (because $A_T$ is
-anchored at the start; `demodulate_series` maps the midpoint anchor back to the start).
+with $t$ the **absolute** time since the observation start and $A_T$ the mean
+anomaly at the **midpoint**, matching `demodulate_series`'s default
+`anchor="midpoint"` (Section 3).
 Equivalently $\Phi = (1/p_0)\int (v/c)\\,\mathrm{d}t$.
 
 ### 5.3 First-order perturbation: the three amplitudes
 
-A grid point differs from the truth by $(\delta x,\delta A_T,\delta\omega_b)$. To
-first order,
+A grid point differs from the truth by $(\delta x,\delta A_T,\delta\omega_b)$.
+With $t'=t-T/2\in[-T/2,T/2]$, to first order,
 
 $$
 \delta\Phi(t) \\;=\\;
 \underbrace{\frac{\delta x}{p_0}}_{\textstyle \alpha}\sin\varphi
-\\;+\\;\frac{x}{p_0}\bigl(\delta A_T + t\\,\delta\omega_b\bigr)\cos\varphi,
-\qquad \varphi=\omega_b t + A_T .
+\\;+\\;\frac{x}{p_0}\bigl(\delta A_T + t'\\,\delta\omega_b\bigr)\cos\varphi,
+\qquad \varphi=\omega_b t' + A_T .
 $$
 
 The worst-case offsets are half a spacing, so the code defines the three
@@ -591,37 +610,38 @@ amplitudes
 $$
 \alpha \\;=\\; \frac{D_x/2}{p_0},\qquad
 \beta \\;=\\; \frac{x_\text{lever}\\,(D_{A_T}/2)}{p_0},\qquad
-\gamma \\;=\\; \frac{x_\text{lever}\\,(D_{\omega}/2)\\,T}{p_0},
+\gamma \\;=\\; \frac{x_\text{lever}\\,(D_{\omega}/2)\,(T/2)}{p_0},
 $$
 
 and writes
 
 $$
-\delta\Phi(t) \\;=\\; \alpha\sin\varphi + \Bigl(\beta+\gamma\\,\frac{t}{T}\Bigr)\cos\varphi .
+\delta\Phi(t) \\;=\\; \alpha\sin\varphi + \Bigl(\beta+\gamma\\,\frac{2t'}{T}\Bigr)\cos\varphi .
 $$
 
 Two points on the definitions:
 
-* The $A_T$ and $\omega_b$ terms carry the **grid point's** $x$, so they are
-  evaluated at $x_\text{lever}=x[-1]$, the top of the (padded) $x$ grid — a
-  covered orbit near the top can snap up to that padded point (Section 5.5).
-* The $\omega_b$ lever is the **full** $T$, not $T/2$, because $t$ runs over
-  $[0,T]$ from the start.
+* The $A_T$ and $\omega_b$ terms carry $x$, so they are evaluated at
+  $x_\text{lever}=x_j+D_x/2$, the largest $x$ that snaps to row $x_j$
+  (Section 5.5). Each row is spaced for its own lever, not the grid top.
+* The $\omega_b$ lever is $T/2$, not $T$, because $A_T$ is anchored at the
+  observation **midpoint**, so $|t'|\le T/2$. Anchoring at the start would
+  double the $\omega_b$ axis for the same budget (Section 5.4).
 
 ### 5.4 The joint bound and the volume-optimal split
 
-At a fixed $t$ we must bound $|\alpha\sin\varphi + B\cos\varphi|$ over the unknown
-orbital phase $\varphi$, where $B=\beta+\gamma\\,t/T$. The identity
+At a fixed $t'$ we must bound $|\alpha\sin\varphi + B\cos\varphi|$ over the unknown
+orbital phase $\varphi$, where $B=\beta+\gamma\\,2t'/T$. The identity
 
 $$
 \max_\varphi\bigl|\alpha\sin\varphi + B\cos\varphi\bigr| = \sqrt{\alpha^2+B^2}
 $$
 
-(for any $\varphi$) and $B\le\beta+\gamma$ (both non-negative, worst at $t=T$) give
-the exact worst case
+(for any $\varphi$) and $B\le\beta+\gamma$ (both non-negative, worst at
+$|t'|=T/2$) give the exact worst case
 
 $$
-\max_{t,\varphi}|\delta\Phi| = \sqrt{\alpha^2+(\beta+\gamma)^2}.
+\max_{t',\varphi}|\delta\Phi| = \sqrt{\alpha^2+(\beta+\gamma)^2}.
 $$
 
 Requiring this to be within the budget gives the **joint constraint**
@@ -658,90 +678,165 @@ $$
 the triangle inequality, gives a cell volume smaller by a factor
 $\frac{27}{6\sqrt3}\approx 2.6$.)
 
-### 5.5 Spacings, ranges and the concrete grid
+### 5.5 Spacings, period bands and the concrete grid
 
 Inverting the amplitude definitions ($\delta = D/2$ at the worst corner) gives the
-spacings used in the code:
+raw-bound spacings (`_band_rows`), each multiplied by the band's stretch
+$s_x, s_A, s_\omega\ge1$ from §5.6 (all 1 under `-circ_strict`):
 
 $$
-D_x = 2\\,\alpha_\text{bud}\\,p_0,\qquad
-D_{A_T} = \frac{2\\,\beta_\text{bud}\\,p_0}{x_\text{lever}},\qquad
-D_\omega = \frac{2\\,\gamma_\text{bud}\\,p_0}{x_\text{lever}\\,T}.
+D_x = 2\\,\alpha_\text{bud}\\,p_0\\,s_x,\qquad
+D_{A_T} = \frac{B\\,p_0\\,s_A}{x_\text{lever}},\qquad
+D_\omega = \frac{B\\,p_0\\,s_\omega}{x_\text{lever}\\,(T/2)},\qquad
+B=\beta_\text{bud}+\gamma_\text{bud}=\varepsilon\sqrt{2/3}.
 $$
 
-The axes (`derive_circular_grid`):
+The grid (`derive_circular_grid`):
 
-* **x axis.** Over the kept orbits, $x\in[x_\text{min},x_\text{max}]$. The grid is
-  $\texttt{x} = x_\text{min} + D_x\cdot\\{0,\dots,\lceil(x_\text{max}-x_\text{min})/D_x\rceil\\}$,
-  padded to the next step above $x_\text{max}$ so every covered orbit is within
-  $D_x/2$ of a grid point. The lever for the other axes is then
-  $x_\text{lever}=x[-1]$ — the **top of the padded grid**, not $x_\text{max}$ —
-  because a covered orbit at $x_\text{max}$ can snap to that padded top point.
-* **$\omega_b$ axis.** Uniform in $\omega_b=2\pi/p_{o,s}$ (not in $p_o$: the phase
-  error is linear in $\delta\omega_b$, and it is $\omega_b$ that keeps the $\cos$
-  lever constant), over
-  $[\omega_\text{lo},\omega_\text{hi}]=[2\pi/p_{o,\max},\\,2\pi/p_{o,\min}]$ on the
-  kept orbits, same padding.
-* **$A_T$ axis.** Uniform over $[0,2\pi)$ with
-  $\lceil 2\pi/D_{A_T}\rceil$ points (no `+1`; the axis is periodic and wraps).
-* Counts $n_{\omega_b},n_x,n_{A_T}$ and total $n_\omega n_x n_{A_T}$.
+* **Period bands.** The `-p_o` ladder is split into one band per ladder period,
+  edges at the geometric midpoints between neighbours. Each band is its own
+  sub-grid, so the coarse steps a long-period band can afford are not forced on
+  the short ones.
+* **x rows.** In a band, $x$ runs over the physical range
+  $x = k\\,\sin i\\,\omega_b^{-2/3}$ for $\sin i\in$ `-sin_i` and $\omega_b$ in the
+  band, in steps of $D_x$ (rows $x_j$). $x$, not $\sin i$, is the coordinate,
+  because it decouples the amplitude from the period ($a_p\propto P_b^{2/3}$).
+* **$\omega_b$ per row.** Uniform in $\omega_b=2\pi/p_{o,s}$ (the phase error is
+  linear in $\delta\omega_b$), but only over the $\omega_b$ some $\sin i$ in range
+  can reach for that row's $x$ — the physical band, not a box.
+* **$(\omega_b, A_T)$ checkerboard.** The $(A_T,\omega)$ cell is the **diamond**
+  $|\beta'|+|\gamma'|\le B$, which tiles on a checkerboard: steps $D_{A_T}$ and
+  $D_\omega$, keeping only points with $(i_\omega+i_{A_T})$ even. Half the points
+  of the inscribed rectangle for the same guarantee. $n_{A_T}=2\lceil\pi/D_{A_T}\rceil$
+  is even so the parity survives the $2\pi$ wrap; every consumer applies the
+  rule (`write_circular_csv`, `test_circular_grid.py`).
+* $A_T$ is the mean anomaly at the observation **midpoint**; the demod is driven
+  with `anchor="midpoint"` to match.
 
 `write_circular_outputs` writes the CSV in the demod's own coordinates: `pb` in
 **days** ($2\pi/\omega_b/86400$), `x` in light-seconds, `at` $=A_T$ in radians at
-the `.inf` epoch.
+the observation **midpoint**. `circular_share_plot` writes
+`circular_template_share.png`: the share of templates per $(p_o,\sin i)$ (each
+template counted towards the `-sin_i` value nearest its implied
+$\sin i = x\\,\omega_b^{2/3}/k$) and the count per band. It is written even under
+`-no_write`.
 
-### 5.6 `-drop_pct` in circular mode
+### 5.6 What the spin-frequency search absorbs (the stretch)
 
-There is no truncation gate, so `apply_drop_circular` ranks orbits by
-$x=a_p\sin i/c$ and drops the largest-$x$ `drop_pct` percent, keeping at least
-one. Every grid lever is monotonic in $x$ (the $A_T$ and $\omega_b$ spacings are
-proportional to $1/x_\text{lever}$, hence the trial counts grow with $x$), so the
-highest-$x$ orbits are the most expensive to cover; dropping them first buys the
-largest template reduction. The dropped orbits are not claimed, and the coverage
-plot reports exactly which survive.
+§5.4 bounds the **raw** $\max_t|\delta\Phi|$. The demodulated series is then
+searched over spin frequency, which takes part of the residual for free:
+
+* a **constant** phase offset does not change the folded power;
+* a **linear** drift $c_1 t$ is a spin-frequency offset $c_1$, which the
+  frequency search finds.
+
+So the residual that costs S/N is what is left after the best line,
+$\min_{c_0,c_1}\max_t|R(t)-c_0-c_1t'|$. For short orbits ($\omega_bT/2\gg1$) $R$
+oscillates many times and a line removes almost nothing. When the observation
+covers less than about one orbit, a grid offset mostly looks like a wrong spin
+phase and period. Expanding about the midpoint,
+
+$$
+\frac{x}{p_0}\sin(\omega_b t'+A_T)\approx\frac{x}{p_0}\Bigl[\sin A_T+\omega_bt'\cos A_T-\tfrac12(\omega_bt')^2\sin A_T+\dots\Bigr],
+$$
+
+so only the curvature and higher terms survive, of relative size
+$\sim(\omega_bT/2)^2/2$. The raw bound over-counts by exactly that, and those are
+the most expensive bands (the count per log-period grows $\propto P_b$).
+
+`search_absorbed_max(R, t')` evaluates the surviving residual as the better of no
+line and the least-squares line. Both are lines the search can land on, so it
+bounds the minimax line from above. `_band_stretch` then sets each band's
+multipliers:
+
+1. **Seed.** $L_A=\max_{A_T,\omega_b}$ `search_absorbed_max`$(\cos\varphi)$ (the
+   $x$ and $A_T$ perturbations, $\sin\varphi$ and $\cos\varphi$, give the same set
+   over all $A_T$), and $L_\omega$ the same for $(2t'/T)\cos\varphi$. Start from
+   $s_x=s_A=1/L_A$, $s_\omega=1/L_\omega$, clipped to $[1, 20]$.
+2. **Certify.** `_cell_worst` evaluates the **exact, nonlinear** residual on the
+   stretched cell boundary — truth half an $x$ step either side of a row (at both
+   ends of the band's $x$ range), on the $(A_T,\omega)$ diamond edge in all four
+   quadrants, scanned over $A_T$ and five $\omega_b$ across the band, with the
+   $A_T$ step as actually built ($2\pi/n_{A_T}$, never more than $\pi$; $\sin$ is
+   periodic, so a larger nominal step would certify nothing).
+3. **Shrink** all three multipliers by $0.98\\,\varepsilon/\text{worst}$ (floored
+   at 1) and re-certify, up to 8 times. The loop stops there without a final
+   check; `test_circular_grid.py` (§5.7) is what certifies the result.
+
+The floor at 1 means no band is ever denser than the raw-bound grid, which §5.4
+already guarantees. The cap at 20 keeps the absorbed drift modest; past it the
+orbit is ajs territory anyway. The volume-optimal $\alpha/B$ split of §5.4 is
+kept and only shrunk uniformly, not re-optimised.
+
+The report prints each band's stretch and the **raw** $\max|R|$ at its cell
+boundary, the drift the search absorbs. It shows up as a spin-frequency offset
+of up to $2\,$raw$/T$ Hz ($2\,$raw Fourier bins) between the reported and true
+spin frequency. The YAML records `search_absorbs_linear` and each band's
+`stretch_x_AT_omega`.
+
+**`-circ_strict`** turns this off and bounds the raw $\max|R|$. Use it if the
+demodulated series is folded at a **fixed** spin frequency rather than searched.
+
+Measured, $T=19209$ s, $p_0=0.01$ s, $\varepsilon=0.2$, the 9-point ladder
+`np.geomspace(0.03, 1.26, 9)` d, i.e.
+`-p_o 8.214e-05 0.0001311 0.0002091 0.0003336 0.0005323 0.0008493 0.001355 0.002162 0.00345`
+(yr). Every band with $\omega_bT/2 > 1.12$ (here, below 0.63 d) stays at
+stretch 1:
+
+| band [d] | $\omega_bT/2$ | stretch $x/A_T/\omega$ | templates, raw bound | templates, absorbed |
+|---|---|---|---|---|
+| 0.03–0.63 (7 bands) | 1.12–23.3 | 1/1/1 | 1.686e10 | 1.686e10 |
+| 0.63–1.00 | 0.70–1.12 | 1.88/1.88/1.16 | 1.054e10 | 2.584e9 |
+| 1.00–1.26 | 0.55–0.70 | 4.49/4.49/1.63 | 7.443e9 | 2.276e8 |
+| **total** | | | **3.484e10** | **1.967e10** |
 
 ### 5.7 Validation
 
 `test_circular_grid.py` Monte-Carlos the guarantee directly, without
 linearisation. It imports the grid code (so it cannot drift), samples random
 circular orbits uniformly in the covered ranges (log-uniform $p_o$, uniform
-$\sin i$, uniform $A_T$), snaps each coordinate to the nearest grid value, and
-computes the **exact** residual spin phase
-$R(t)=\frac{x_t}{p_0}\sin(\omega_t t+A_t)-\frac{x_g}{p_0}\sin(\omega_g t+A_g)$ on a
-fine time grid. It asserts
+$\sin i$, uniform $A_T$), snaps each to the nearest point of its band (nearest
+$x$ row, then the L1-nearest checkerboard point), and computes the **exact**
+residual spin phase
+$R(t)=\frac{x_t}{p_0}\sin(\omega_t t'+A_t)-\frac{x_g}{p_0}\sin(\omega_g t'+A_g)$ on
+a fine time grid. It scores `search_absorbed_max(R)` (the raw $\max|R|$ under
+`-circ_strict`) as a fraction of the band budget, and asserts that
 
-* the worst $\max_t|R|$ over all Monte-Carlo trials is within the budget,
-* the deterministic worst cell corner is within budget on both the linear bound
-  $\sqrt{\alpha^2+(\beta+\gamma)^2}$ **and** the exact nonlinear $R$,
-* a random cell-corner scan (cell midpoints, which uniform sampling almost never
-  hits) is within budget.
+* the worst over all Monte-Carlo trials is within budget,
+* each band's deterministic worst corner (top row, half a step on every axis,
+  $A_T$ scanned) is within budget on the exact nonlinear $R$,
+* a random scan of cell-boundary points (which uniform sampling almost never
+  hits), restricted to truths inside the band, is within budget.
 
-Run it with `-drop_pct 0` to verify the fundamental spacing over the full range,
-or with the desired `-drop_pct` to check the kept box (it reports how many samples
-fell outside).
+It passes in both modes on the bundled `inj.inf` config (worst 0.986 of budget;
+0.996 with `-circ_strict`) and on $T=19209$ s, $p_0=0.01$ s, $\varepsilon=0.2$
+(worst 0.9998; 0.9999 with `-circ_strict`).
 
 ### 5.8 Worked example (circular)
 
-On the bundled `inj.inf` with `-drop_pct 50` (fully default otherwise), the
-derivation above gives exactly:
+On the bundled `inj.inf` (T = 1509.95 s, $p_0=1$ s, $\varepsilon=0.1$, default
+2 min–1 d ladder), `python nsns_grid.py -inf inj.inf -mode circular` gives:
 
 ```
-p_o = 0.001388-0.1662 d (342 periods, uniform in omega_b)
-x   = 0.008568-0.2956 lt-s (4)
-A_T = 0-2pi (28)
-joint phase budget 0.1 cyc (a^2+(b+c)^2 <= tol^2; a=0.05774, b=c=0.04082)
-d(omega_b)=1.5233e-04 rad/s   d(x)=1.1547e-01 lt-s   d(A_T)=2.3001e-01 rad
-Total templates: 3.830e+04
+       p_o band [d]   templates   share   stretch x/A_T/omega raw max|R|
+0.001389-0.001873     1.980e+02    5.5%   1.00   1.00   1.00      0.0858
+0.001873-0.003406     2.870e+02    7.9%   1.00   1.00   1.00      0.0894
+0.003406-0.006195     2.520e+02    7.0%   1.00   1.00   1.00      0.0923
+0.006195-0.01127      3.290e+02    9.1%   1.00   1.00   1.00      0.0945
+ 0.01127-0.02049      4.720e+02   13.0%   1.00   1.00   1.00      0.0962
+ 0.02049-0.03727      7.320e+02   20.2%   1.00   1.00   1.03       0.099
+ 0.03727-0.06778      7.830e+02   21.6%   1.23   1.23   1.08       0.119
+ 0.06778-0.1233       1.730e+02    4.8%   3.65   3.65   1.56       0.343
+  0.1233-0.2242       6.200e+01    1.7%  12.09  12.09   2.73        1.07
+  0.2242-0.4077       2.200e+01    0.6%  20.00  20.00   6.20        1.79
+  0.4077-0.7415       4.800e+01    1.3%  17.93  17.93  10.04        1.62
+  0.7415-1            2.600e+02    7.2%   8.71   8.71   8.71       0.849
+              total   3.618e+03
 ```
 
-Check: $\alpha_\text{bud}=0.1/\sqrt3=0.057735$,
-$\beta_\text{bud}=0.1/\sqrt6=0.040825$;
-$D_x=2(0.057735)=0.11547$ lt-s. The $x$ grid top is
-$x[-1]=0.008568+3(0.11547)=0.35498$, so
-$D_{A_T}=2(0.040825)/0.35501=0.23001$ rad and
-$D_\omega=0.23001/1509.95=1.5233\times10^{-4}$ rad/s. Counts:
-$\lceil 2\pi/0.23001\rceil=28$, and
-$n_\omega=\lceil(0.052360-0.00043746)/1.5233\times10^{-4}\rceil+1=342$.
+against **4.428e+04** with `-circ_strict` (12x). The raw drift tops out at
+1.8 cycles, i.e. a spin-frequency offset of up to 3.6 Fourier bins (2.4 mHz)
+absorbed by the search.
 
 ---
 
@@ -786,8 +881,14 @@ A manual `-p_break` (in yr) overrides the search entirely.
 ### 6.2 The two sub-grids
 
 * **Circular side** (`derive_circular_grid` with `p_o` filtered to `< p_break`):
-  unchanged from §5, except the period ladder is restricted. `-drop_pct` still
-  drops the highest-`x` orbits of this side.
+  unchanged from §5, except the period ladder is restricted. Nothing is
+  dropped here; `-drop_pct` applies to the ajs side only. The §5.6 stretch only
+  helps bands with $\omega_bT/2\lesssim1$ ($P_b\gtrsim\pi T$; ≳ 0.63 d at
+  $T=19209$ s), so it barely changes a circular side whose `p_break` is below
+  that, and gives the §5.6 savings when `p_break` lies above it.
+  The top circular band ends at the last circular ladder period, not at
+  `p_break`: orbits between that period and `p_break` are deliberately claimed
+  by neither sub-grid.
 * **Ajs side** (`ajs_grid_from_scan` on the records with `p_o ≥ p_break`): the
   gate, `-drop_pct`, ranges and allocation of §4 are applied to that subset only.
   The default caps are re-derived from the **shortest ajs-side orbit** (near
@@ -821,7 +922,7 @@ coverage is:
 ```
 
 The last `p_o` below 60% is 0.008355 d, so `p_break = 0.015195 d`: circular
-covers 2 min–12 min (4 ladder points, 11115 templates), ajs covers 22 min–1 d
+covers 2 min–12 min (4 ladder points, 939 templates), ajs covers 22 min–1 d
 (28800 scanned segments, caps from the `p_break` orbit). The ajs side's
 `trunc_max` is 0.0272 cycles (vs 0.0664 for the all-ajs grid), because the hard
 short orbits are gone.
@@ -832,25 +933,33 @@ short orbits are gone.
 
 Every mode writes machine-readable files for the sweep:
 
-* **`<outstem>.yaml`** — the full spec: ranges, spacings, active/caps, tolerances,
-  counts. Circular adds `mode`, `n_omega_b/n_x/n_A_T/n_trials`; ajs adds `terms`,
-  `anchor`, `trunc_max`, `budget_m`, `eps`, `active`, `guarantee_ok`; hybrid adds
-  `p_break`, `break_coverage`, `coverage_by_p_o` and nests both sub-specs under
-  `circular:` and `ajs:`.
+* **`<outstem>.yaml`** — the spec; its keys depend on the mode:
+  * ajs: ranges, spacings, `active`, caps, tolerances, `terms`, `anchor`,
+    `trunc_max`, `budget_m`, `eps`, `guarantee_ok` and counts. There is no
+    `mode` key; a spec without one is ajs.
+  * circular: `mode`, tolerances, `A_T_anchor` (`midpoint`), `lattice`,
+    `search_absorbs_linear`, per-band `bands` (edges, `stretch_x_AT_omega`,
+    `n_trials`) and `n_trials`. It has no ranges/spacings/caps: the grid is
+    per band and per row.
+  * hybrid: `mode`, `p_break`, `break_coverage`, `coverage_by_p_o`, and both
+    sub-specs nested under `circular:` and `ajs:`.
 * **`<outstem>.csv`** — every concrete trial, `%.10g`, one per line, **LF** line
   endings (bash builds output filenames from these literal strings):
   * ajs header `accel,jerk,snap`, one row per $(a,j,s)$;
   * circular header `pb,x,at`, one row per $(p_b,x,A_T)$.
   * Hybrid writes **two** files, `<outstem>_circular.csv` and `<outstem>_ajs.csv`.
 * Plots under `-plot_subdir` (default `grid_size_plots/`):
-  `corner_feasible_fraction.png`, `claimed_fraction.png` (ajs), and
-  `circular_coverage.png` (circular; hybrid writes `hybrid_circular_coverage.png`).
+  `corner_feasible_fraction.png`, `claimed_fraction.png` (ajs only),
+  `circular_template_share.png` (circular) and
+  `hybrid_circular_template_share.png` (hybrid, which writes no ajs plots).
+  The share plot is written even under `-no_write`.
   With `-plot`, ajs also writes one phase / best-fit figure per orbit.
 
 `grids_from_spec` and `write_grid_outputs` (ajs) build the Cartesian product and
 write it; `write_circular_outputs` does the same for circular, converting
-$\omega_b\to p_b$ (days) for the CSV; hybrid calls the ajs and circular writers
-with explicit per-model CSV paths.
+$\omega_b\to p_b$ (days) for the CSV. Hybrid calls `write_circular_csv` for
+`<outstem>_circular.csv` and `write_grid_outputs` for `<outstem>_ajs.csv` (with
+its YAML skipped), then writes the combined YAML itself.
 
 ---
 
@@ -858,19 +967,19 @@ with explicit per-model CSV paths.
 
 | file | what it does |
 |---|---|
-| `nsns_grid.py` | **Grid derivation** (both modes), YAML/CSV/plots. |
+| `nsns_grid.py` | **Grid derivation** (ajs, circular, hybrid), YAML/CSV/plots. |
 | `src/demod.jl` (package) | The exact time-remap resamplers, PRESTO's `.fft` packing, `presto_deredden!` and `demodulate_series`. Was `demod/resample.jl`; moved into the package so the in-memory driver uses the same code. |
 | `demod_dat.jl` | On-disk wrapper: apply the remap to one `.dat`/`.inf`; CLI + `demod_file`. |
 | `demod_grid.jl` | Batch, on disk: demodulate one observation at every row of a grid CSV, in one Julia process. |
 | `src/demodsearch.jl` (package) | The in-memory driver behind `bin/coherent_search.jl --demod-grid` (Section 11). |
 | `pulsegen_gr.py` | Inject a full Damour–Deruelle binary pulsar into a `.dat`/`.inf` (+ `_truth.yaml`). |
 | `run_demod_search.sh` | End-to-end: inject → derive grid → nearest grid point → demod → search. |
-| `test_circular_demod.sh` | Same, for circular mode, with assertions on recovery. |
+| `test_circular_demod.sh` | Same, for circular mode, with assertions on recovery. *Untracked (local only).* |
 | `run_nsns_sweep.sh` | Full sweep: derive grid → demodulate **every** point → FFT → search all; CPU-parallel or one GPU invocation. |
 | `combine_cohout.py` | Merge all per-point `.cohout` into one candidate list (optional plot + truth crosshair). |
-| `test_circular_grid.py` | MCMC / adversarial validation of the circular grid's phase guarantee. |
-| `nsns_grid.yaml`, `nsns_grid.csv` | Example derived grid. |
-| `inj.dat`, `inj.inf`, `demod_out/`, `grid_size_plots/`, `plots/`, `nsns_sweep*/` | Test observation and outputs. |
+| `test_circular_grid.py` | Monte Carlo / adversarial validation of the circular grid's phase guarantee (search-absorbed residual; `-circ_strict` for raw). |
+| `nsns_grid.yaml`, `nsns_grid.csv` | Example derived grid (local only, untracked). |
+| `inj.dat`, `inj.inf`, `demod_out/`, `grid_size_plots/`, `plots/`, `nsns_sweep*/` | Test observation and outputs (local only: `inj.dat` is gitignored, the rest untracked; `run_nsns_sweep.sh`'s default `INF` points at `inj.inf`, so set `INF` on a fresh clone). |
 
 The orbit and DD-model helpers (`los_velocity`, `los_acceleration`,
 `los_jerk`, `los_snap`, `observed_period`, `semi_major_axis_sini`, `pk_coeffs`)
@@ -889,7 +998,7 @@ SNR=50 MODE=circular PB_DAYS=0.041666666666666664 bash demod/run_demod_search.sh
 
 # Full sweep over every grid point (grid -> demod all -> realfft/rednoise/search).
 bash demod/run_nsns_sweep.sh
-MODE=circular DROPPCT=50 bash demod/run_nsns_sweep.sh
+MODE=circular bash demod/run_nsns_sweep.sh
 MODE=hybrid bash demod/run_nsns_sweep.sh                    # circular + ajs
 MODE=hybrid P_BREAK=0.02 bash demod/run_nsns_sweep.sh       # manual p_break [yr]
 MODE=hybrid PO="0.0000038 0.00001 0.1 100" bash demod/run_nsns_sweep.sh
@@ -897,12 +1006,12 @@ GRID_CSV=/path/to/grid.csv bash demod/run_nsns_sweep.sh   # skip derivation
 
 # Grid only:
 python demod/nsns_grid.py -inf OBS.inf -p0 1.0 -phase_tol_cycles 0.1
-python demod/nsns_grid.py -inf OBS.inf -mode circular -drop_pct 50
+python demod/nsns_grid.py -inf OBS.inf -mode circular             # -circ_strict: raw bound
 python demod/nsns_grid.py -inf OBS.inf -mode hybrid          # auto p_break
 python demod/nsns_grid.py -inf OBS.inf -mode hybrid -p_break 0.02 -break_coverage 60
 
 # Validate the circular guarantee:
-python demod/test_circular_grid.py -inf OBS.inf -drop_pct 0 -n_mc 2000
+python demod/test_circular_grid.py -inf OBS.inf -n_mc 2000
 ```
 
 The in-memory driver replaces steps 2 and 3 for a whole sweep -- one process, one
@@ -919,8 +1028,11 @@ julia --project=. -t auto bin/coherent_search.jl OBS.dat \
 `bin/plot_candidates.jl`.  Section 11 has the details.
 
 Requires Julia with the `CoherentSearch.jl` project, a Python with
-numpy/scipy/matplotlib/yaml, PRESTO's `realfft`/`rednoise` on `PATH` (for the
-shell pipeline only), and the sibling `FFA_stacking` checkout.
+numpy/scipy/matplotlib/yaml, PRESTO's `realfft`/`rednoise` (shell pipeline
+only), and the sibling `FFA_stacking` checkout. The scripts do **not** search
+`PATH`: `PYTHON`, `REALFFT` and `REDNOISE` default to `/home/fadong/anaconda3/bin/`,
+so set them on another host. `run_nsns_sweep.sh` searches on the CPU by default;
+`GPU=1` (exactly) switches to `--gpu`.
 
 ---
 
@@ -928,7 +1040,7 @@ shell pipeline only), and the sibling `FFA_stacking` checkout.
 
 * `test_circular_grid.py` — verifies the circular phase-tolerance guarantee
   (Section 5.7). Exits non-zero on failure so it can gate a run.
-* `test_circular_demod.sh` — end-to-end circular inject → grid → demod → search,
+* `test_circular_demod.sh` (untracked, local only) — end-to-end circular inject → grid → demod → search,
   asserting the pulsar is recovered near $1/p_0$ above a threshold S/N.
 * `run_demod_search.sh` — end-to-end ajs (and circular) smoke test.
 
@@ -984,8 +1096,9 @@ julia --project=. -t auto bin/coherent_search.jl OBS.dat \
   with the optimum at N ≈ `nthreads()` and the default within 3% of it.  At
   `-t 32` on the same 64 points the curve is flat from 8 to 32 slots
   (10.3/10.4/**10.0**/10.2/10.3 s), so the default is not a knife edge.  With
-  `N > 1` the demodulated points are searched on tasks and their `.cohout` files
-  written as each finishes, so ordering is not the grid order.
+  `N > 1` the demodulated points are searched on tasks; the `.cohout` files are
+  written first-in-first-out as slots are reclaimed, i.e. in grid order. `--gpu`
+  forces `N = 1` (the device is one resource).
   - **Each concurrent slot owns a separate `SearchCache`.**  Workspaces are
     indexed by task index inside `_search_region!`, so two searches sharing one
     would have their chunks writing into the same workspaces — a silent data
