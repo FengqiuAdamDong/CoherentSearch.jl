@@ -134,7 +134,7 @@ using PrecompileTools: @setup_workload, @compile_workload
     # The demodulation driver needs its own tiny `.dat`/`.inf` pair and a 1-row
     # grid CSV, in the same temp directory.  Small on purpose: this only has to
     # reach the code paths `demod_main` adds (the grid reader, the resampler, the
-    # rfft packing and the rednoise walk), and a bigger series would cost
+    # realfft port and the rednoise walk), and a bigger series would cost
     # precompilation time for the same coverage.  `_dN` is even, as `realfft`
     # requires, and 8192 keeps the dereddening walk over ~30 log-spaced blocks.
     _dN = 1 << 13

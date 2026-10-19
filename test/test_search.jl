@@ -1170,6 +1170,41 @@ const EXAMPLE_FFT_RED = joinpath(@__DIR__, "..", "..", "coherent_search",
     end
 end
 
+@testset "sigma sanity warning names a dereddened input correctly" begin
+    # The guard fires on a >10% analytic-vs-measured disagreement either way,
+    # but the message must not tell a user who already ran `rednoise` to run it
+    # again: on an FFT flagged `dereddened` (a `_red.fft`, or the in-memory
+    # `--demod-grid` file) a moderate gap is residual red noise, not a raw FFT.
+    rng = MersenneTwister(3)
+    N = 4096
+    H = N ÷ 2
+    function synth_ft(scale; dered)
+        amps = ComplexF32.(randn(rng, H) ./ sqrt(2) .* scale,
+                           randn(rng, H) ./ sqrt(2) .* scale)
+        inf = SimpleInf("x.inf", "SYNTH", 5.5e4, N, 1.0, 0.0)
+        return FFTFile(dered ? "x_red.fft" : "x.fft", amps, inf, N, 1.0, 1.0,
+                       dered, dered, real(amps[1]), imag(amps[1]))
+    end
+    params = SearchParams(nharms = 8, m = 16, precision = :f64,
+                          decimations = decimation_set(8, 1))
+    Nprof = 256
+    function check(ft)
+        ws = CoherentSearch.Workspace(params, Nprof)
+        dplans = build_direct_plans(params, 100.0)
+        return CoherentSearch._sigma_sanity_check(ft, params, ws, dplans,
+                                                  100.0, 1 / 8, Nprof, Nprof)
+    end
+    # scale 1.5 => measured power 2.25x, so analytic/measured ≈ 0.65: a clear
+    # failure in both arms, stable well above the estimator's ~4% scatter.
+    ok = @test_logs (:warn, r"already-dereddened") match_mode = :any check(synth_ft(1.5; dered = true))
+    @test !ok
+    ok = @test_logs (:warn, r"does not look normalised") match_mode = :any check(synth_ft(1.5; dered = false))
+    @test !ok
+    # Unit-variance white noise passes without a warning.
+    ok = @test_logs check(synth_ft(1.0; dered = true))
+    @test ok
+end
+
 @testset "analytic sigma finds the same signal as the measured one" begin
     ft = FFTFile(EXAMPLE_FFT_RED)
     mk(sig) = SearchParams(nharms = 60, m = 16, precision = :f64,

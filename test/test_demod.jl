@@ -90,12 +90,43 @@ end
     # the longhand sum accumulates in a different order than the transform's.
     @test real(a[1]) ≈ sum(x)
     @test imag(a[1]) ≈ sum(Float32((-1)^(i + 1)) * x[i] for i in 1:N)
-    @test imag(a[1]) == real(FFTW.rfft(x)[N ÷ 2 + 1])    # the transform's own Nyquist
-    # The rest are the positive-frequency amplitudes verbatim.
-    @test a[2:end] == FFTW.rfft(x)[2:(N ÷ 2)]
+    # The rest are the positive-frequency amplitudes.  They are mathematically
+    # `rfft`'s bins, but PRESTO's complex-FFT packing rounds differently, so
+    # this is a sanity check only; the byte test against `realfft` follows.
+    ref = FFTW.rfft(x)
+    @test imag(a[1]) ≈ real(ref[N ÷ 2 + 1])
+    @test a[2:end] ≈ ref[2:(N ÷ 2)] rtol = 1e-5
 
     # `realfft()` requires an even sample count and errors otherwise.
     @test_throws ErrorException presto_fft_amps(randn(Float32, 511), Dict{Int,Any}())
+end
+
+@testset "presto_fft_amps is byte-identical to PRESTO's realfft" begin
+    if !(HAS_REALFFT && CoherentSearch.presto_fftw_exact())
+        @info "Skipping the byte-exact realfft comparison; PRESTO realfft or a matching libfftw3f not found" REALFFT CoherentSearch.presto_fftw_library()
+    else
+        # N/2 > 16384 is PRESTO's FFTW_ESTIMATE branch -- the one every real
+        # demodulated observation uses -- and is deterministic, so the whole
+        # `.fft` must match byte for byte.  Below that PRESTO uses FFTW_MEASURE,
+        # whose plan selection is timing-dependent: two runs of PRESTO's own
+        # `realfft` need not agree, so a byte assertion there would be flaky.
+        for N in (32770,)
+            dt = 0.0098304
+            x = randn(MersenneTwister(17 + N), Float32, N)
+            dir = mktempdir()
+            name = "rf"
+            write(joinpath(dir, "$name.dat"), x)
+            write_presto_inf(joinpath(dir, "$name.inf"), N, dt, 54365.98291064203; name)
+            run(pipeline(Cmd(`$REALFFT $name.dat`; dir); stdout=devnull, stderr=devnull))
+
+            ours = presto_fft_amps(x, Dict{Int,Any}())
+            theirs = Vector{ComplexF32}(undef, N ÷ 2)
+            open(joinpath(dir, name * ".fft"), "r") do io
+                read!(io, theirs)
+            end
+            @test reinterpret(UInt8, ours) == reinterpret(UInt8, theirs)
+        end
+    end
 end
 
 @testset "presto_invsqrt: the Quake reciprocal, not 1/sqrt" begin
@@ -135,31 +166,44 @@ end
     @test presto_deredden!(ComplexF32[1, 2, 3], 100.0) > 0
 end
 
-@testset "presto_deredden! vs PRESTO's rednoise" begin
+@testset "presto_deredden! is byte-identical to PRESTO's rednoise" begin
     if !(HAS_REALFFT && HAS_REDNOISE)
         @info "Skipping the PRESTO rednoise comparison; binaries not found" REALFFT REDNOISE
     else
         N = 153600
         dt = 0.0098304
         x = randn(MersenneTwister(1234), Float32, N)
-        a = presto_fft_amps(x, Dict{Int,Any}())
         H = N ÷ 2
         dir = mktempdir()
         name = "rn"
-        write(joinpath(dir, "$name.fft"), a)
+        write(joinpath(dir, "$name.dat"), x)
         write_presto_inf(joinpath(dir, "$name.inf"), N, dt, 54365.98291064203; name)
-        presto_deredden!(a, N * dt)
+        # Deredden the *same* `.fft` PRESTO does, so this measures the rednoise
+        # port alone even on a host where `realfft` is not byte-identical.
+        run(pipeline(Cmd(`$REALFFT $name.dat`; dir); stdout=devnull, stderr=devnull))
+        theirs = Vector{ComplexF32}(undef, H)
+        open(joinpath(dir, name * ".fft"), "r") do io
+            read!(io, theirs)
+        end
         run(pipeline(Cmd(`$REDNOISE $name.fft`; dir); stdout=devnull, stderr=devnull))
         red = Vector{ComplexF32}(undef, H)
         open(joinpath(dir, name * "_red.fft"), "r") do io
             read!(io, red)
         end
-        maxrel = maximum(abs.(a .- red) ./ abs.(red))
-        # Measured 2.5e-7 for this port.  The tolerance is loose enough for
-        # another host's libm in the medians and tight enough that the even-n
-        # median convention (7% off, see `_lower_median!`) fails loudly -- which
-        # is the whole reason this test exists.
-        @test maxrel < 1e-5
+
+        ours = copy(theirs)
+        presto_deredden!(ours, N * dt)
+        @test reinterpret(UInt8, ours) == reinterpret(UInt8, red)
+
+        # And the in-memory chain (our realfft -> our rednoise) lands on the
+        # same bytes as `realfft -rednoise` would.
+        if CoherentSearch.presto_fftw_exact()
+            chain = presto_fft_amps(x, Dict{Int,Any}())
+            presto_deredden!(chain, N * dt)
+            @test reinterpret(UInt8, chain) == reinterpret(UInt8, red)
+        else
+            @info "Skipping the full-chain byte comparison; no PRESTO-matching libfftw3f" CoherentSearch.presto_fftw_library()
+        end
     end
 end
 
@@ -244,7 +288,9 @@ end
     if !HAS_PULSEGEN
         @info "Skipping the inject/demod/search end-to-end test; pulsegen_gr.py or its Python not found" PULSEGEN
     else
-        N = 1 << 15
+        # N/2 > 16384 keeps PRESTO on its deterministic FFTW_ESTIMATE branch,
+        # so the in-memory and on-disk arms can be required to agree exactly.
+        N = 1 << 16
         dt = 0.0098304
         epoch = 5.5e4
         dir = mktempdir()
@@ -309,8 +355,16 @@ end
                         backend = CPUBackend())
             @test !isempty(c2)
             b2 = argmax(c -> c.metric, c2)
-            @test abs(b2.freq - best.freq) <= 1 * df
-            @test isapprox(b2.metric, best.metric; rtol = 0.01)
+            if CoherentSearch.presto_fftw_exact()
+                # Byte-identical `realfft` + `rednoise` means the search reads
+                # exactly the same amplitudes in both arms, so the candidate is
+                # identical -- not merely close.
+                @test b2.freq == best.freq
+                @test b2.metric == best.metric
+            else
+                @test abs(b2.freq - best.freq) <= 1 * df
+                @test isapprox(b2.metric, best.metric; rtol = 0.01)
+            end
         else
             @info "Skipping the on-disk arm of the end-to-end test; PRESTO binaries not found"
         end
@@ -375,6 +429,54 @@ end
     end
 end
 
+
+@testset "CLI --demod-grid searches the rednoise output" begin
+    # This is the regression pin for the driver's hand-off: the array that
+    # `presto_deredden!` rewrote must be the one the search reads, with the
+    # resampled series' `T`/`.inf` metadata -- not the input observation's.
+    if !(HAS_REALFFT && HAS_REDNOISE)
+        @info "Skipping the in-memory vs on-disk demod comparison; PRESTO binaries not found"
+    else
+        # N/2 > 16384: PRESTO's deterministic ESTIMATE branch, so the final
+        # candidate files can be compared as text, not just approximately.
+        N = 1 << 16
+        dt = 0.0098304
+        epoch = 5.5e4
+        dir = mktempdir()
+        dat = joinpath(dir, "obs.dat")
+        write(dat, synth_series(N; f = 1.0, snr = 25.0, seed = 61))
+        write_presto_inf(joinpath(dir, "obs.inf"), N, dt, epoch; name = "obs")
+
+        pb, x_lt, A_T = 0.041666666666666664, 0.41361909, 0.7
+        grid = joinpath(dir, "grid.csv")
+        write(grid, "pb,x,at\n$pb,$x_lt,$A_T\n")
+        memout = joinpath(dir, "mem")
+        argv = [dat, "--demod-grid", grid, "--outdir", memout, "--nharms", "8",
+                "--threshold", "0.0", "--nowisdom", "--noprogress",
+                "--lofreq", "0.5", "--hifreq", "2.0", "--blocksize", "64",
+                "--demod-concurrency", "1"]
+        with_logger(NullLogger()) do
+            CoherentSearch.main(argv)
+        end
+        memfile = only(readdir(memout))
+        @test endswith(memfile, "_red.cohout")
+
+        # The same demodulated series through the file-based chain, using the
+        # same demod_dat wrapper, then PRESTO's own realfft and rednoise.
+        disk = joinpath(dir, "disk.dat")
+        demod_file(dat, disk; pb = pb, x = x_lt, A_T = A_T)
+        run(pipeline(Cmd(`$REALFFT disk.dat`; dir); stdout=devnull, stderr=devnull))
+        run(pipeline(Cmd(`$REDNOISE disk.fft`; dir); stdout=devnull, stderr=devnull))
+        diskcoh = joinpath(dir, "disk.cohout")
+        with_logger(NullLogger()) do
+            CoherentSearch.main([joinpath(dir, "disk_red.fft"), "--nharms", "8",
+                                 "--threshold", "0.0", "--nowisdom", "--noprogress",
+                                 "--lofreq", "0.5", "--hifreq", "2.0",
+                                 "--blocksize", "64", "-o", diskcoh])
+        end
+        @test read(joinpath(memout, memfile), String) == read(diskcoh, String)
+    end
+end
 
 @testset "demod concurrency: same candidates, one .dat read" begin
     # The pipeline-parallel driver searches several grid points at once, each

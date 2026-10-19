@@ -2312,11 +2312,21 @@ function _sigma_sanity_check(ft::FFTFile, params::SearchParams, ws::Workspace,
         howmuch = (ratio > 2 || ratio < 0.5) ?
             "a factor of $(round(max(ratio, 1 / ratio); sigdigits = 3))" :
             "$(round(100 * worst; digits = 1))%"
-        @warn """The analytic noise scale disagrees with the measured one by \
-                 $howmuch — every reported S/N is scaled by that.  This normally \
-                 means the input FFT is not normalised (Fourier powers with mean \
-                 1); run PRESTO's `rednoise` on it, or pass `--sigma measured` to \
-                 estimate the scale from the data instead.""" file = basename(ft.path)
+        if ft.dereddened
+            @warn """The analytic noise scale differs from the measured one by \
+                     $howmuch on this already-dereddened FFT — reported S/N is \
+                     scaled by that.  PRESTO's `rednoise` flattens the running \
+                     median power, not every local mean, so residual red noise, \
+                     RFI or a non-white spectrum can leave the closed form off; \
+                     this does *not* mean rednoise was skipped.  Pass \
+                     `--sigma measured` to use the data-derived scale instead.""" file = basename(ft.path)
+        else
+            @warn """The analytic noise scale disagrees with the measured one by \
+                     $howmuch — every reported S/N is scaled by that.  The input \
+                     FFT does not look normalised (Fourier powers with mean 1); \
+                     run PRESTO's `rednoise` on it, or pass `--sigma measured` to \
+                     estimate the scale from the data instead.""" file = basename(ft.path)
+        end
         @printf(stderr, "         worst at k=%d, %.4f Hz: measured %.5g vs analytic %.5g (ratio %.4g)\n",
                 worst_k, worst_f, meas_w, ana_w, ratio)
         return false

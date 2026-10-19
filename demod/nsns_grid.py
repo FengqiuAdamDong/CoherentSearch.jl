@@ -3,13 +3,13 @@
 NS-NS accel/jerk/snap demodulation grid for a single observation.
 
 A copy of FFA_stacking/orbit_simulation/kinematic_grid_spacing.py specialised
-to a double neutron-star binary on an orbit from 30 minutes out to 10 days,
+to a double neutron-star binary on an orbit from 4 hours out to 1 day,
 searched over ONE PRESTO .fft/.inf observation (not a stacked campaign).
 
 Differences from the original:
 
   * Companion/pulsar masses default to 1.4/1.4 Msun (NS-NS), not Sgr A*.
-  * Orbital periods default to a log-spaced ladder over [30 min, 10 d].
+  * Orbital periods default to a log-spaced ladder over [4 h, 1 d].
   * The observation length T = N*dt is read from the .inf (-t_obs overrides);
     that same T is both the campaign span and the single-observation length,
     so the two parameters of the original collapse into one.
@@ -537,8 +537,8 @@ def orbit_phase_param_plots(groups, args, model_lbl, plot_dir):
     print(f"Done: {len(groups)} phase/parameter plots in {plot_dir}/")
 
 
-# NS-NS default orbital-period ladder: 2 minutes out to 24 hours, in years.
-_NSNS_PO_MIN_D = 2.0 / 1440.0
+# NS-NS default orbital-period ladder: 4 hours out to 24 hours, in years.
+_NSNS_PO_MIN_D = 4.0 / 24.0
 _NSNS_PO_MAX_D = 1.0
 _DEFAULT_PO = list(np.geomspace(_NSNS_PO_MIN_D, _NSNS_PO_MAX_D, 12) / 365.25)
 
@@ -561,7 +561,7 @@ def build_parser():
     ap.add_argument("-p_o", type=float, nargs="+", default=_DEFAULT_PO,
                     help="Orbital periods to scan [yr]; worst case over all of "
                          "them is used. Default is 12 log-spaced points from "
-                         "2 min to 24 h (NS-NS range)")
+                         "4 h to 24 h (NS-NS range)")
     ap.add_argument("-e", type=float, nargs="+",
                     default=[0.0, 0.1, 0.3, 0.5, 0.7, 0.9],
                     help="Eccentricities to scan; worst case over all of them "

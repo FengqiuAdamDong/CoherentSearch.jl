@@ -142,8 +142,9 @@ exist, and a 220-point sweep no longer starts 220 Julia processes. It reuses
 every search option and writes only `<stem>_demod_..._red.cohout`, which the
 existing `combine_cohout.py` parses unchanged. Every search option applies as it
 would to an `.fft`; `-o`, `--plot` and `--plotstem` are rejected (they name one
-output each). PRESTO's `rednoise` is reproduced in-process to 2.5e-7, and
-`FFTW.rfft` reproduces `realfft`'s `.fft` layout. See `demod/README.md` §11.
+output each). PRESTO's `realfft` and `rednoise` are reproduced in-process byte
+for byte (for the FFT sizes real demodulations use), so the search reads exactly
+the amplitudes the on-disk chain would have given it. See `demod/README.md` §11.
 
 The file-based end-to-end driver remains `demod/run_nsns_sweep.sh`
 (`MODE=ajs|circular|hybrid`).
@@ -217,6 +218,9 @@ Nearly every non-obvious choice below follows from one of them.
   take). And because the analytic assumption fails *silently* and in the
   dangerous direction — a normalization error inflates every S/N — the search
   scores a few chunks both ways and warns when they disagree by more than 10%.
+  On an input already named `_red` (or produced by `--demod-grid`) the warning
+  says so explicitly: a moderate disagreement there is residual red noise or a
+  non-white spectrum, **not** evidence that `rednoise` was skipped.
 - Skipping the de-reddening step is not an option, and we measured that on our
   own default path: detection falls 76% → 1% across the knee range.
 
@@ -499,7 +503,11 @@ Because that failure is silent and inflates S/N (a candidate list full of noise
 rather than an empty one), `search` **checks it**: three chunks spread across the
 band are scored both ways, and a disagreement over 10% produces a warning naming
 both numbers. It costs ~0.1% of the runtime. On an un-normalized input the check
-fires immediately — the raw test fixture is out by a factor of ~1000.
+fires immediately — the raw test fixture is out by a factor of ~1000. On a
+dereddened input the warning is worded differently, because PRESTO's `rednoise`
+flattens the running *median* power rather than every local mean: a ~10–20%
+disagreement at low frequency can simply be residual red noise, and
+`--sigma measured` is the appropriate response.
 
 ### Candidate de-duplication
 

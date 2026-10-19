@@ -21,6 +21,7 @@
 # `presto_deredden!` for the one place those disagree.
 
 using FFTW: FFTW
+using Libdl: Libdl
 
 # ---------------------------------------------------------------------------
 # Exact time-remap resampler
@@ -325,38 +326,257 @@ function projected_x(pb_s, sin_i, companion_mass, pulsar_mass)
 end
 
 # ---------------------------------------------------------------------------
-# PRESTO `.fft` packing, in memory
+# PRESTO's `realfft`, in memory -- a byte-for-byte port
 # ---------------------------------------------------------------------------
+#
+# PRESTO does not call FFTW's real-to-complex transform.  `realfft()` in
+# `fastffts.c` packs the N real samples *in place* as N/2 complex values,
+# runs a length-N/2 **complex** FFT, and then unpacks that into PRESTO's
+# `.fft` layout with a double-precision trig recursion.  Its complex FFT is
+# `fftwcall()` (`fftcalls.c`), which uses FFTW_MEASURE for N/2 <= 16384 and
+# FFTW_ESTIMATE above that.  `FFTW.rfft` is mathematically the same transform
+# but a different algorithm (and a different FFTW build), so its last bits --
+# and therefore the S/N -- differ.  We reproduce the actual chain instead.
+#
+# Bit-exactness needs the *same* libfftw3f that PRESTO used.  We take its path
+# from the `realfft` executable itself (`ldd realfft`), falling back to
+# `Libdl.find_library`, so the plan algorithms and SIMD codelets are the same
+# ones PRESTO's binary runs.  Set `COHERENT_FFTW_LIB` to override.
+
+const _PRESTO_FFTW_LOCK = ReentrantLock()
+const _PRESTO_FFTW_READY = Ref(false)
+const _PRESTO_FFTW_HANDLE = Ref{Ptr{Cvoid}}(C_NULL)
+const _PRESTO_FFTW_PLAN = Ref{Ptr{Cvoid}}(C_NULL)
+const _PRESTO_FFTW_EXECUTE = Ref{Ptr{Cvoid}}(C_NULL)
+const _PRESTO_FFTW_DESTROY = Ref{Ptr{Cvoid}}(C_NULL)
+const _PRESTO_FFTW_EXACT = Ref(false)
+const _PRESTO_FFTW_PATH = Ref("")
+
+# Pointers must not survive a precompiled image: a saved address is meaningless
+# in the next process.  `demod_main` is in the precompile workload below, so it
+# *does* run this code while precompiling; reset the lazy state on load.
+function __init__()
+    _PRESTO_FFTW_READY[] = false
+    _PRESTO_FFTW_HANDLE[] = C_NULL
+    _PRESTO_FFTW_PLAN[] = C_NULL
+    _PRESTO_FFTW_EXECUTE[] = C_NULL
+    _PRESTO_FFTW_DESTROY[] = C_NULL
+    _PRESTO_FFTW_EXACT[] = false
+    _PRESTO_FFTW_PATH[] = ""
+    return nothing
+end
+
+function _presto_fftw_library()
+    override = get(ENV, "COHERENT_FFTW_LIB", "")
+    isempty(override) || return override
+
+    # The strongest match: ask the very binary this is meant to reproduce which
+    # libfftw3f it loads.  `ldd` resolves an absolute path, so a conda or
+    # custom install is handled the same way as the system library.
+    exe = get(ENV, "REALFFT", "")
+    isempty(exe) && (exe = Sys.which("realfft"))
+    if exe !== nothing && Sys.islinux()
+        ldd = Sys.which("ldd")
+        if ldd !== nothing
+            try
+                for line in eachline(IOBuffer(read(`$ldd $exe`, String)))
+                    occursin("libfftw3f", line) || continue
+                    parts = split(line)
+                    k = findfirst(==("=>"), parts)
+                    k === nothing && continue
+                    k < length(parts) || continue
+                    return String(parts[k + 1])
+                end
+            catch
+                # An unreadable/incompatible binary is not fatal: fall through.
+            end
+        end
+    end
+    return Libdl.find_library(["libfftw3f.so.3", "libfftw3f", "libfftw3f.dylib"])
+end
+
+function _presto_fftw_init!()
+    _PRESTO_FFTW_READY[] && return
+    lock(_PRESTO_FFTW_LOCK) do
+        _PRESTO_FFTW_READY[] && return
+        _PRESTO_FFTW_READY[] = true          # even a failure is final
+        path = _presto_fftw_library()
+        isempty(path) && return
+        try
+            handle = Libdl.dlopen(path)
+            plan = Libdl.dlsym(handle, :fftwf_plan_dft_1d)
+            execute = Libdl.dlsym(handle, :fftwf_execute_dft)
+            destroy = Libdl.dlsym(handle, :fftwf_destroy_plan)
+            _PRESTO_FFTW_HANDLE[] = handle
+            _PRESTO_FFTW_PLAN[] = plan
+            _PRESTO_FFTW_EXECUTE[] = execute
+            _PRESTO_FFTW_DESTROY[] = destroy
+            _PRESTO_FFTW_PATH[] = Libdl.dlpath(handle)
+            _PRESTO_FFTW_EXACT[] = true
+        catch
+            _PRESTO_FFTW_HANDLE[] = C_NULL
+            _PRESTO_FFTW_PLAN[] = C_NULL
+            _PRESTO_FFTW_EXECUTE[] = C_NULL
+            _PRESTO_FFTW_DESTROY[] = C_NULL
+            _PRESTO_FFTW_PATH[] = ""
+            _PRESTO_FFTW_EXACT[] = false
+        end
+    end
+    return nothing
+end
+
+"""
+    presto_fftw_exact() -> Bool
+    presto_fftw_library() -> String
+
+Whether a PRESTO-compatible `libfftw3f` was found, and which one.  Without it
+`presto_fft_amps` still works (through FFTW.jl's own library, with PRESTO's
+exact unpacking) but cannot be byte-identical to PRESTO's `realfft`.
+"""
+function presto_fftw_exact()
+    _presto_fftw_init!()
+    return _PRESTO_FFTW_EXACT[]
+end
+
+function presto_fftw_library()
+    _presto_fftw_init!()
+    return _PRESTO_FFTW_PATH[]
+end
+
+# One cached complex-FFT plan.  `plan == C_NULL` means the fallback path stores
+# a Julia FFTW plan in `jplan` instead.
+mutable struct _PrestoFFTPlan
+    n::Int
+    plan::Ptr{Cvoid}
+    jplan::Any
+end
+
+function _destroy_presto_fft_plan(p::_PrestoFFTPlan)
+    p.plan == C_NULL && return nothing
+    lock(_PRESTO_FFTW_LOCK) do
+        if p.plan != C_NULL && _PRESTO_FFTW_DESTROY[] != C_NULL
+            ccall(_PRESTO_FFTW_DESTROY[], Cvoid, (Ptr{Cvoid},), p.plan)
+        end
+        p.plan = C_NULL
+    end
+    return nothing
+end
+
+# FFTW_ESTIMATE = 1 << 6, FFTW_MEASURE = 0; PRESTO's `fftwcall()` uses the
+# former above 16384 points and the latter at or below it.
+const _FFTW_MEASURE = UInt32(0)
+const _FFTW_ESTIMATE = UInt32(1 << 6)
+const _FFTW_FORWARD = Cint(-1)
+
+function _make_presto_fft_plan(data::Vector{ComplexF32}, N::Int)
+    H = N ÷ 2
+    if _PRESTO_FFTW_EXACT[]
+        flag = H > 16384 ? _FFTW_ESTIMATE : _FFTW_MEASURE
+        # FFTW planning may scribble on the input (MEASURE always does), so
+        # copy it away and put it back exactly as `fftwcall()` does.
+        saved = copy(data)
+        plan = ccall(_PRESTO_FFTW_PLAN[], Ptr{Cvoid},
+                     (Cint, Ptr{ComplexF32}, Ptr{ComplexF32}, Cint, Cuint),
+                     H, pointer(data), pointer(data), _FFTW_FORWARD, flag)
+        copyto!(data, saved)
+        plan == C_NULL && error("PRESTO-compatible FFTW failed to plan N=$N")
+        p = _PrestoFFTPlan(N, plan, nothing)
+        finalizer(_destroy_presto_fft_plan, p)
+        return p
+    end
+    jp = FFTW.plan_fft!(data; flags = FFTW.ESTIMATE)
+    return _PrestoFFTPlan(N, C_NULL, jp)
+end
 
 """
     presto_fft_amps(x, plans::Dict{Int,Any}) -> Vector{ComplexF32}
 
-Pack the real FFT of the `Float32` time series `x` exactly as PRESTO's
-`.fft` layout has it: `N÷2` interleaved `ComplexF32` bins in which bin 1 packs
-the DC term (`sum(x)`) in its real part and the Nyquist term in its imaginary
-part, and bins 2..N÷2 are the positive-frequency amplitudes.
+Byte-for-byte port of PRESTO's `realfft()` (`src/fastffts.c`) for a forward
+transform.  The result has PRESTO's `.fft` layout: `N÷2` `ComplexF32` bins in
+which bin 1 packs DC in its real part and Nyquist in its imaginary part, and
+bins 2..N÷2 are the positive-frequency amplitudes.  `N` must be even.
 
-`plans` caches one `FFTW.plan_rfft` per length, keyed by `N`; the plan is built
-with `FFTW.ESTIMATE`.  `MEASURE` was measured at **35.5 s** for `N = 6e6`
-against 15 ms for `ESTIMATE`, and the chain is re-planned for every grid point's
-own (varying) length, so it is not affordable here.  `rfft` is the right engine:
-it agrees with PRESTO's `realfft` to a worst-bin relative amplitude of 1.2e-3,
-and *exactly* on the Nyquist value, where numpy's pocketfft does not.
+`plans` caches the length-`N/2` complex-FFT plan per `N`.  That plan is the
+same FFTW call PRESTO makes (including its MEASURE/ESTIMATE switch), against
+the same `libfftw3f` when [`presto_fftw_exact`](@ref) is true; the unpacking
+trig recursion is then transcribed operation for operation, including which
+intermediates are rounded to `Float32` before being widened.  On the PRESTO
+test series this reproduces `realfft`'s output bytes exactly.
+
+One caveat is inherited from PRESTO, not added here: for `N÷2 <= 16384`
+PRESTO asks FFTW for a `MEASURE` plan, and FFTW picks the fastest algorithm by
+timing it, so two runs of PRESTO's own `realfft` can differ in the last bits.
+Above that threshold PRESTO uses a deterministic `ESTIMATE` plan; that is the
+regime of a real demodulated observation (`N` in the 10^5..10^7 range), and
+there the match is exact.  (PRESTO switches to its own six-step FFT above
+2×10^8 complex points; that is far outside the demod range and not ported.)
 """
 function presto_fft_amps(x::AbstractVector{Float32}, plans::Dict{Int,Any})
     N = length(x)
     iseven(N) || error("The number of time samples must be even (realfft requires it), got $N")
+    N >= 2 || error("realfft needs at least two samples, got $N")
     H = N ÷ 2
+
+    _presto_fftw_init!()
+    # PRESTO treats the N floats as N/2 complex values in place; `reinterpret`
+    # is that memcpy, and the complex FFT below is length N/2 -- not N.
+    xbuf = x isa Vector{Float32} ? x : Vector{Float32}(x)
+    data = copy(reinterpret(ComplexF32, xbuf))
     plan = get!(plans, N) do
-        FFTW.plan_rfft(x; flags = FFTW.ESTIMATE)
+        _make_presto_fft_plan(data, N)
     end
-    X = plan * x
-    a = Vector{ComplexF32}(undef, H)
-    a[1] = ComplexF32(real(X[1]), real(X[H+1]))
-    @inbounds for i in 2:H
-        a[i] = ComplexF32(X[i])
+    plan.n == N || error("FFT plan cache key/length mismatch: $(plan.n) != $N")
+
+    if plan.plan == C_NULL
+        plan.jplan * data
+    else
+        ccall(_PRESTO_FFTW_EXECUTE[], Cvoid,
+              (Ptr{Cvoid}, Ptr{ComplexF32}, Ptr{ComplexF32}),
+              plan.plan, pointer(data), pointer(data))
     end
-    return a
+
+    # `realfft()`'s forward post-processing, exactly as written in
+    # `src/fastffts.c`.  The C locals are double; the float sums inside the
+    # parentheses are rounded to float *before* being promoted, so preserve
+    # that distinction.
+    n = N
+    nby2 = n >> 1
+    nby4 = n >> 2
+    cc = -0.5
+    theta = -2.0 * π / n
+    wr = cos(theta)
+    wi = sin(theta)
+    tmp1 = sin(0.5 * theta)
+    wpr = -2.0 * tmp1 * tmp1
+    wpi = wi
+    il = 1
+    ih = nby2 - il
+    @inbounds while il <= nby4
+        dl = data[il+1]
+        dh = data[ih+1]
+        h1r = 0.5 * Float64(dl.re + dh.re)
+        h1i = 0.5 * Float64(dl.im - dh.im)
+        h2r = -cc * Float64(dl.im + dh.im)
+        h2i = cc * Float64(dl.re - dh.re)
+        h2rwr = h2r * wr
+        h2rwi = h2r * wi
+        h2iwr = h2i * wr
+        h2iwi = h2i * wi
+        data[il+1] = ComplexF32(Float32(h1r + h2rwr - h2iwi),
+                                Float32(h1i + h2iwr + h2rwi))
+        data[ih+1] = ComplexF32(Float32(h1r - h2rwr + h2iwi),
+                                Float32(-h1i + h2iwr + h2rwi))
+        tmp1 = wr
+        wr = tmp1 * wpr - wi * wpi + wr
+        wi = wi * wpr + tmp1 * wpi + wi
+        il += 1
+        ih -= 1
+    end
+    # Forward transform: data[0] becomes (DC, Nyquist).
+    tmp1 = Float64(data[1].re)
+    data[1] = ComplexF32(Float32(tmp1 + data[1].im),
+                         Float32(tmp1 - data[1].im))
+    return data
 end
 
 # ---------------------------------------------------------------------------
@@ -398,9 +618,12 @@ end
 
 Port of PRESTO's `dered_engine` (`src/misc_utils.c:900-1050`), operating in
 place on a whole `N÷2`-bin `.fft` amplitude array, and returning the number of
-bins it wrote.  `T` is the length of the original time series in seconds
-(`N*dt`) -- of the *undemodulated* series, matching what `rednoise` reads from
-the `.inf`.
+bins it wrote.  `T` is the length in seconds (`N*dt`) of the series that was
+transformed: for the demodulation driver that is the **resampled** series
+(`length(series)*dt`), because `demod_dat.jl` rewrites the `.inf` with the
+resampled `N` and `rednoise` reads `N*dt` from that file.  Using the input
+observation's `T` here would pick different block boundaries and different
+window-freeze bins.
 
 The algorithm walks the band in blocks whose length grows logarithmically
 (`startwidth*log(binnum)`, capped at `endwidth`, and frozen at `endwidth` once
@@ -414,12 +637,21 @@ in the C, so the index arithmetic can be read against the source line for line;
 `binnum` is the count of bins consumed so far and doubles as a frequency over
 `T`.
 
-Two deliberate `Float64` widenings, both required to match the binary: the slope
-arithmetic (`mean_old`, `mean_new`, `dslope`, and the `mean_old + dslope*ii`
-argument, converted to `Float32` only at the `presto_invsqrt` call) is
-`Float64` here, and `T` is widened through `Float32` once exactly as C's
-`const float Tf = (float) T;`.  Forming that argument in `Float32` throughout,
-as the C source does, measures 1.9e-4 against PRESTO where this measures 2e-7.
+The arithmetic follows C's types exactly, which is what makes the output byte
+for byte: `mean_old`/`mean_new`/`dslope`/`norm` are `Float32` (as declared in
+`dered_engine`), but the expressions that C evaluates in `double` stay in
+`Float64` until their assignment.  In particular
+
+  * `median(...) / log(2.0)` is a double division, then rounded to `Float32`;
+  * `(mean_new - mean_old)` is a `Float32` subtraction, and the division by
+    `0.5*(nblk_old + nblk_new)` (a double) is done in `Float64`, then rounded;
+  * `mean_old + dslope*ii` is entirely `Float32`; and
+  * `(float) binnum / Tf` is compared against the *double* `endfreq`.
+
+`T` is widened through `Float32` once, exactly as C's
+`const float Tf = (float) T;`.  Rounded to `Float64` throughout instead, the
+result differs from PRESTO in the last bits; rounded to `Float32` too early, it
+differs in the fourth digit.
 
 A full run returns `length(a)` — every bin, DC included, is rewritten.  A
 smaller count means the walk stopped early (the C code processes `numbins` and
@@ -460,13 +692,17 @@ function presto_deredden!(a::Vector{ComplexF32}, T::Real;
     mid_old = nblk_old >> 1
 
     @inbounds for ii in 1:nblk_old
-        powbuf[ii] = real(oldbuf[ii])^2 + imag(oldbuf[ii])^2
+        powr = oldbuf[ii].re
+        powi = oldbuf[ii].im
+        powbuf[ii] = powr * powr + powi * powi
     end
-    mean_old = Float64(_lower_median!(powbuf, nblk_old)) / log(2.0)
+    # C: float mean_old = median(...) / log(2.0) -- the division is double,
+    # the assignment rounds to float.
+    mean_old = Float32(Float64(_lower_median!(powbuf, nblk_old)) / log(2.0))
 
     # The first half of the first block has no slope: only a few bins, and the
     # C code says that is probably OK.
-    norm = presto_invsqrt(Float32(mean_old))
+    norm = presto_invsqrt(mean_old)
     @inbounds for ii in 1:mid_old
         outbuf[ii] = oldbuf[ii] * norm
     end
@@ -479,9 +715,9 @@ function presto_deredden!(a::Vector{ComplexF32}, T::Real;
     binnum += nblk_old
     bufflen = min(Int(trunc(startwidth * log(binnum))), Int(endwidth))
 
-    # `dslope` is 1.0 in the C declaration and reaches the final partial block
-    # unchanged only if the while loop never ran.
-    dslope = 1.0
+    # `dslope` is 1.0f0 in the C declaration and reaches the final partial
+    # block unchanged only if the while loop never ran.
+    dslope = 1.0f0
     while true
         nblk_new = min(bufflen, numbins - rpos)
         nblk_new <= 0 && break
@@ -492,11 +728,17 @@ function presto_deredden!(a::Vector{ComplexF32}, T::Real;
         mid_new = nblk_new >> 1
 
         @inbounds for ii in 1:nblk_new
-            powbuf[ii] = real(newbuf[ii])^2 + imag(newbuf[ii])^2
+            powr = newbuf[ii].re
+            powi = newbuf[ii].im
+            powbuf[ii] = powr * powr + powi * powi
         end
-        mean_new = Float64(_lower_median!(powbuf, nblk_new)) / log(2.0)
+        mean_new = Float32(Float64(_lower_median!(powbuf, nblk_new)) / log(2.0))
 
-        dslope = (mean_new - mean_old) / (0.5 * (nblk_old + nblk_new))
+        # C: dslope = (mean_new - mean_old) / (0.5 * (nblk_old + nblk_new));
+        # the numerator is a float subtraction, the 0.5 denominator term is a
+        # double, so the division widens and only the result rounds to float.
+        dslope = Float32(Float64(mean_new - mean_old) /
+                         (0.5 * (nblk_old + nblk_new)))
 
         # The second half of the old block, then the first half of the new one,
         # both against the ramp from the old median to the new: the ramp's
@@ -506,11 +748,11 @@ function presto_deredden!(a::Vector{ComplexF32}, T::Real;
         ii = 0
         @inbounds for ind in (mid_old+1):nblk_old
             ii += 1
-            outbuf[ii] = oldbuf[ind] * presto_invsqrt(Float32(mean_old + dslope * (ii - 1)))
+            outbuf[ii] = oldbuf[ind] * presto_invsqrt(mean_old + dslope * (ii - 1))
         end
         @inbounds for ind in 1:mid_new
             ii += 1
-            outbuf[ii] = newbuf[ind] * presto_invsqrt(Float32(mean_old + dslope * (ii - 1)))
+            outbuf[ii] = newbuf[ind] * presto_invsqrt(mean_old + dslope * (ii - 1))
         end
         @inbounds for jj in 1:ii
             a[wpos+jj] = outbuf[jj]
@@ -519,7 +761,9 @@ function presto_deredden!(a::Vector{ComplexF32}, T::Real;
         numwrote += ii
 
         binnum += nblk_new
-        if Float32(binnum) / Tf < Float32(endfreq)
+        # C: if ((float) binnum / Tf < endfreq) -- float quotient against the
+        # double `endfreq`, so compare in Float64.
+        if Float32(binnum) / Tf < Float64(endfreq)
             bufflen = min(Int(trunc(startwidth * log(binnum))), Int(endwidth))
         else
             bufflen = Int(endwidth)
@@ -534,7 +778,7 @@ function presto_deredden!(a::Vector{ComplexF32}, T::Real;
     ii = 0
     @inbounds for ind in (mid_old+1):nblk_old
         ii += 1
-        outbuf[ii] = oldbuf[ind] * presto_invsqrt(Float32(mean_old + dslope * (ii - 1)))
+        outbuf[ii] = oldbuf[ind] * presto_invsqrt(mean_old + dslope * (ii - 1))
     end
     @inbounds for jj in 1:ii
         a[wpos+jj] = outbuf[jj]

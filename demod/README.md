@@ -116,7 +116,7 @@ constants):
 ```
 -p0              1.0                 (use the smallest period searched)
 -pdot            1e-15
--p_o             12 log-spaced points from 2 min to 1 day [yr]
+-p_o             12 log-spaced points from 4 h to 1 day [yr]
 -e               0.0 0.1 0.3 0.5 0.7 0.9
 -sin_i           0.1 0.3 0.5 0.7 0.9
 -omega_peri      0  pi/8  pi/4  3pi/8  pi/2
@@ -133,8 +133,7 @@ constants):
 -no_write        off     (derive + report only; write no CSV/YAML/plots)
 ```
 
-> The module docstring says "30 minutes out to 10 days"; that is stale. The
-> actual default ladder is 2 minutes to 1 day, as set by `_NSNS_PO_MIN_D`,
+> The actual default ladder is 4 hours to 1 day, as set by `_NSNS_PO_MIN_D`,
 > `_NSNS_PO_MAX_D` and matching the `-p_o` help text.
 
 ---
@@ -815,27 +814,27 @@ It passes in both modes on the bundled `inj.inf` config (worst 0.986 of budget;
 ### 5.8 Worked example (circular)
 
 On the bundled `inj.inf` (T = 1509.95 s, $p_0=1$ s, $\varepsilon=0.1$, default
-2 min–1 d ladder), `python nsns_grid.py -inf inj.inf -mode circular` gives:
+4 h–1 d ladder), `python nsns_grid.py -inf inj.inf -mode circular` gives:
 
 ```
        p_o band [d]   templates   share   stretch x/A_T/omega raw max|R|
-0.001389-0.001873     1.980e+02    5.5%   1.00   1.00   1.00      0.0858
-0.001873-0.003406     2.870e+02    7.9%   1.00   1.00   1.00      0.0894
-0.003406-0.006195     2.520e+02    7.0%   1.00   1.00   1.00      0.0923
-0.006195-0.01127      3.290e+02    9.1%   1.00   1.00   1.00      0.0945
- 0.01127-0.02049      4.720e+02   13.0%   1.00   1.00   1.00      0.0962
- 0.02049-0.03727      7.320e+02   20.2%   1.00   1.00   1.03       0.099
- 0.03727-0.06778      7.830e+02   21.6%   1.23   1.23   1.08       0.119
- 0.06778-0.1233       1.730e+02    4.8%   3.65   3.65   1.56       0.343
-  0.1233-0.2242       6.200e+01    1.7%  12.09  12.09   2.73        1.07
-  0.2242-0.4077       2.200e+01    0.6%  20.00  20.00   6.20        1.79
-  0.4077-0.7415       4.800e+01    1.3%  17.93  17.93  10.04        1.62
-  0.7415-1            2.600e+02    7.2%   8.71   8.71   8.71       0.849
-              total   3.618e+03
+  0.1667-0.1808       2.200e+01    2.6%  19.24  19.24   4.46        1.56
+  0.1808-0.2128       2.200e+01    2.6%  20.00  20.00   5.02        1.67
+  0.2128-0.2504       2.200e+01    2.6%  20.00  20.00   5.89        1.76
+  0.2504-0.2947       2.200e+01    2.6%  20.00  20.00   6.91        1.72
+  0.2947-0.3469       2.200e+01    2.6%  20.00  20.00   8.12         1.7
+  0.3469-0.4082       2.200e+01    2.6%  19.04  19.04   9.08        1.65
+  0.4082-0.4805       4.800e+01    5.7%  17.51  17.51   9.82        1.58
+  0.4805-0.5655       5.000e+01    5.9%  15.75  15.75  10.38        1.45
+  0.5655-0.6655       8.400e+01   10.0%  13.89  13.89  10.77        1.28
+  0.6655-0.7832       1.340e+02   15.9%  10.69  10.69   9.75        1.01
+  0.7832-0.9218       1.980e+02   23.5%   8.77   8.77   8.77       0.853
+  0.9218-1            1.980e+02   23.5%   9.04   9.04   9.04        0.88
+              total   8.440e+02
 ```
 
-against **4.428e+04** with `-circ_strict` (12x). The raw drift tops out at
-1.8 cycles, i.e. a spin-frequency offset of up to 3.6 Fourier bins (2.4 mHz)
+against **7.015e+04** with `-circ_strict` (83x). The raw drift tops out at
+1.76 cycles, i.e. a spin-frequency offset of up to 3.5 Fourier bins (2.3 mHz)
 absorbed by the search.
 
 ---
@@ -912,20 +911,29 @@ coverage is:
 
 ```
       p_o [yr]    p_o [d]   ajs coverage
-   3.80257e-06  0.0013889          83.3%
-   6.91568e-06   0.002526          60.0%
-   1.25774e-05  0.0045939          40.0%   <- dip
-   2.28744e-05  0.0083549          28.3%   <- worst (~p_o ~ T_obs)
-   4.16013e-05   0.015195          93.3%   <- recovers
-   7.56597e-05   0.027635         100.0%
-   ... (all longer periods 100%)
+   0.000456308    0.16667         100.0%
+   0.000537031    0.19615         100.0%
+   0.000632034    0.23085         100.0%
+   0.000743844    0.27169         100.0%
+   0.000875432    0.31975         100.0%
+     0.0010303    0.37632         100.0%
+    0.00121256    0.44289         100.0%
+    0.00142707    0.52124         100.0%
+    0.00167953    0.61345         100.0%
+    0.00197664    0.72197         100.0%
+    0.00232632    0.84969         100.0%
+    0.00273785          1         100.0%
 ```
 
-The last `p_o` below 60% is 0.008355 d, so `p_break = 0.015195 d`: circular
-covers 2 min–12 min (4 ladder points, 939 templates), ajs covers 22 min–1 d
-(28800 scanned segments, caps from the `p_break` orbit). The ajs side's
-`trunc_max` is 0.0272 cycles (vs 0.0664 for the all-ajs grid), because the hard
-short orbits are gone.
+With the default 4 h floor every scanned orbit is ≳ 9.5 × T_obs, so the
+coverage dip near `p_o ~ T_obs` described in §6.1 falls below the ladder and
+every point clears `-break_coverage`. The auto switch therefore keeps `p_break`
+at the first ladder period (0.000456308 yr) and there is **no circular
+sub-grid**: the whole band is gridded ajs. (A longer observation pushes `T_obs`
+up toward 4 h and the split reappears.) The ajs side then runs on all 43200
+scanned segments, caps from the 0.16667 d orbit (`|accel| ≤ 1.071e+04 m/s²`,
+`|jerk| ≤ 203.7 m/s³`, `|snap| ≤ 7.531 m/s⁴`); `trunc_max` is 0.0000 cycles, so
+only the accel axis stays active and the grid collapses to 3 templates.
 
 ---
 
@@ -1056,8 +1064,8 @@ all back, and pays a Julia process start-up per point.
 `--demod-grid` does the whole chain inside one process, per grid point:
 
 ```
-raw .dat held in RAM  ->  exact time remap  ->  real FFT  ->  rednoise
-                      ->  coherent search    ->  <stem>_demod_..._red.cohout
+raw .dat held in RAM  ->  exact time remap  ->  PRESTO realfft  ->  rednoise
+                      ->  coherent search     ->  <stem>_demod_..._red.cohout
 ```
 
 The observation is read **once**; peak memory is the raw series plus one
@@ -1110,10 +1118,12 @@ julia --project=. -t auto bin/coherent_search.jl OBS.dat \
     that alternative was measured at 1.06–1.13x (better scaling, but it re-reads
     the `.dat` and re-pays ~0.85 s/point of start-up) and it costs real file
     I/O.  See below.
-* The FFTW plan for each demodulated length is built with `FFTW.ESTIMATE`, not
-  `MEASURE`: for `N = 6e6` those cost 15 ms and **35.5 s** respectively, and each
-  grid point lands on its own length (`N'` varies per point by hundreds of
-  samples) so `MEASURE` would be paid over and over.
+* The FFTW plan for each demodulated length uses the same switch as PRESTO's
+  `fftwcall()`: `FFTW_ESTIMATE` above 16384 complex points and `FFTW_MEASURE`
+  at or below it.  Real demodulations are far above the threshold, so they pay
+  only `ESTIMATE`; for `N = 6e6` that is 15 ms rather than the 35.5 s a
+  `MEASURE` plan costs.  The plan is cached per demodulated length because each
+  grid point lands on its own `N'` (varying by hundreds of samples).
 
 **Why not one process per grid point.**  `demod/run_nsns_sweep.sh` does exactly
 that (and `bin/parallel_search.py` for `.fft` files), and it does scale better
@@ -1125,17 +1135,25 @@ paid once).  The `.dat` read itself is negligible (~0.11 ms warm for a 600 kB
 series) — it is the start-up that costs.
 
 **Agreement with the file-based chain.**  The same demodulated series run both
-ways gives the same best candidate; on a 1 s injected pulsar at `--nharms 16`
-that is `f = 1.000192 Hz` (truth 1.0) at S/N 8.64, matching the on-disk
-`realfft`+`rednoise`+search to within one Fourier bin and 1% of S/N.  The
-comparison is pinned by `test/test_demod.jl`.
+ways now produces the same candidate file, bit for bit: the in-memory
+`realfft` port matches PRESTO's `.fft` bytes, the rednoise port matches the
+`_red.fft` bytes, and the search reads that dereddened array.  For a real
+demodulated observation (`N/2 > 16384`, PRESTO's deterministic `ESTIMATE`
+branch) `test/test_demod.jl` asserts the full `.cohout` equality against
+`demod_dat.jl` -> `realfft` -> `rednoise` -> `coherent_search`.
 
 The underlying ports, so a failure can be localised:
 
 | step | port | agreement |
 |---|---|---|
-| real FFT (`presto_fft_amps`) | `FFTW.rfft`, DC/Nyquist packed into bin 1 | `1.2e-3` worst bin, `2.6e-5` rms, Nyquist exact |
-| rednoise (`presto_deredden!`) | `dered_engine` (`presto/src/misc_utils.c`) | **`2.5e-7`** max relative amplitude |
+| real FFT (`presto_fft_amps`) | `realfft()` (`fastffts.c`), including its N/2-point complex FFT and double trig recursion | **bytes identical** for `N/2 > 16384`; below that PRESTO itself uses timing-dependent `MEASURE` plans, so only numerically equivalent |
+| rednoise (`presto_deredden!`) | `dered_engine` (`presto/src/misc_utils.c`) | **bytes identical** |
+
+Byte identity needs the same `libfftw3f` PRESTO links.  The port finds it from
+the `realfft` executable's `ldd` output (or `Libdl.find_library`), and
+`COHERENT_FFTW_LIB` overrides the choice; `CoherentSearch.presto_fftw_exact()`
+reports whether a match was found.  Without it the chain still runs through
+FFTW.jl's library with PRESTO's exact unpacking, but is not byte-identical.
 
 Two details of the rednoise port are load-bearing and were measured against the
 shipped binaries, not the C source's intent:

@@ -4,7 +4,7 @@
 #
 #   MODE=ajs (default) -- accel/jerk/snap grid (demod/nsns_grid.py, a copy of
 #     FFA_stacking/orbit_simulation/kinematic_grid_spacing.py specialised to a
-#     NS-NS orbit; default ladder 2 min - 1 d).  Each point writes
+#     NS-NS orbit; default ladder 4 h - 1 d).  Each point writes
 #     <INBASE>_demod_a{A}_j{J}_s{S}.*.
 #   MODE=circular -- pure Keplerian circular-orbit grid (pb,x,at; one sub-grid
 #     per period band, checkerboard in (omega_b, A_T) per x row; no

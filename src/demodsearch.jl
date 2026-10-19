@@ -3,8 +3,8 @@
 # Entered from `main` when `--demod-grid` is given (see `cli.jl`).  The whole
 # chain runs inside this process, per grid point:
 #
-#   raw .dat held in RAM  ->  exact time remap  ->  real FFT  ->  rednoise
-#                         ->  coherent search    ->  <stem>_demod_..._red.cohout
+#   raw .dat held in RAM  ->  exact time remap  ->  PRESTO realfft  ->  rednoise
+#                         ->  coherent search     ->  <stem>_demod_..._red.cohout
 #
 # The point is the file count.  The shell pipeline this replaces
 # (`demod/demod_grid.jl` writing a `.dat` + `.inf` per point, then PRESTO's
@@ -126,7 +126,7 @@ function demod_main(a)
         put!(caches, SearchCache())
     end
     pending = Tuple{Task,AbstractString,Float64}[]
-    plans = Dict{Int,Any}()          # FFTW rfft plans, keyed by the demodulated N
+    plans = Dict{Int,Any}()          # PRESTO-compatible FFT plans, keyed by demodulated N
 
     npoints = length(points) * length(dats)
     done = 0
@@ -164,6 +164,10 @@ function demod_main(a)
                 # `dt` is unchanged -- the remap shifts samples, it does not
                 # resample them -- so T' = N'*dt and everything scaled by T
                 # (`r_lo = lofreq*T`, Nyquist) is per-point, as it must be.
+                #
+                # `amps` is not copied or re-read: it is the exact array
+                # `presto_deredden!` rewrote above, stored by reference in the
+                # `FFTFile`, so the search cannot accidentally see the raw FFT.
                 Np = length(series)
                 demin = SimpleInf(infpath, inf.object, epoch, Np, inf.dt, inf.DM)
                 ft = FFTFile(stem, amps, demin, Np, Np * inf.dt, 1.0 / (Np * inf.dt),
