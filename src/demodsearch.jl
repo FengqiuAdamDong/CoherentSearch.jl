@@ -45,6 +45,13 @@ process per grid point.  Running a process per point was measured at only
 Julia's start-up, plan building and wisdom import per point (~0.85 s against a
 ~1.8 s point).  The observation is read once here, as intended.
 
+Peak memory is independent of the number of grid points, but it does scale with
+`--demod-concurrency`: every live slot holds one demodulated amplitude array
+(`N/2` `ComplexF32`, i.e. 4 bytes per input sample), and the remap holds the
+de-meaned and remapped series (8 bytes per sample).  On a long observation
+(`N` in the 10^8 range) lower the concurrency if RAM is tight; the default
+one-slot-per-thread can otherwise pin several GB of amplitudes alone.
+
 Concurrent searches must not share a `SearchCache`: `Workspace`s are indexed by
 task index inside `_search_region!`, so two live searches would have their chunks
 writing into the same workspaces.  Each slot in the pool owns one cache, which

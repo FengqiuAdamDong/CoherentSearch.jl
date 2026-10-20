@@ -236,6 +236,20 @@ end
     end
 end
 
+@testset "demodulate_series: remap allocation stays O(N)" begin
+    # Regression for the demod sweep's memory churn.  The remap used to build
+    # `tau`, a `polyval` result plus its `abs.` copy for every series order, and
+    # an N-long index vector: ~88 bytes per sample, i.e. 15.7 GiB of garbage for
+    # every point of a 192M-sample --demod-grid sweep.  Scalar passes need only
+    # the de-meaned copy and the remapped series (8 bytes/sample).
+    N = 1 << 14
+    x = randn(MersenneTwister(5), Float32, N)
+    kw = (accel = -338.7, jerk = 0.2512, snap = 9.41e-4)
+    demodulate_series(x, 0.0098304, 5.5e4; kw...)          # warm compilation
+    bytes = @allocated demodulate_series(x, 0.0098304, 5.5e4; kw...)
+    @test bytes < 64 * N
+end
+
 @testset "demodulate_series matches demod_dat.jl" begin
     # `demod/demod_dat.jl` is a thin wrapper over `demodulate_series` now, so
     # this pins that the wrapper's output IS the returned vector -- bit for bit,

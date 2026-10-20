@@ -1070,7 +1070,11 @@ raw .dat held in RAM  ->  exact time remap  ->  PRESTO realfft  ->  rednoise
 
 The observation is read **once**; peak memory is the raw series plus one
 demodulated series plus one amplitude array plus a bounded FFT-plan cache,
-independent of the grid size.  Nothing but the `.cohout` files is written.
+independent of the grid size.  The remap is evaluated on the fly rather than
+through N-long `tau`/`polyval`/index temporaries, so a point allocates ~8 bytes
+per sample (the de-meaned copy and the remapped series) instead of ~88; at the
+192M-sample fixture that is ~1.4 GiB rather than ~16 GiB of garbage per grid
+point.  Nothing but the `.cohout` files is written.
 
 ```sh
 julia --project=. -t auto bin/coherent_search.jl OBS.dat \

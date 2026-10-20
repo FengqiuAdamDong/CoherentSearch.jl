@@ -104,13 +104,21 @@ function _velocity_poly(accel, jerk, snap; v0 = 0.0)
 end
 
 """
-    _exact_remap_poly(accel, jerk, snap, tau, tsamp; tol_samples, max_order, v0)
+    _exact_remap_poly(accel, jerk, snap, tsamp, tstart_ind, nsamp; tol_samples,
+                      max_order, v0)
 
 Ascending coefficients of the exact de-drift remap `u(tau)`, adding series
 orders until the next order's peak contribution over `tau` is below
 `tol_samples` samples.  Returns `(u_coeffs, order_used, converged)`.
+
+`tau` is not materialised: sample `i`'s time is `(i - 1 + tstart_ind) * tsamp`,
+exactly the broadcast `resample_ts_shift_snap` used to build.  At
+`N = 1.92e8` the old `polyval(tau, term)` plus `abs.()` pair allocated 3 GB per
+series order, and this runs for every grid point of a demod sweep.  The
+accumulation order (Horner, left to right) is unchanged, so the coefficients
+are bit-identical to the array version.
 """
-function _exact_remap_poly(accel, jerk, snap, tau, tsamp;
+function _exact_remap_poly(accel, jerk, snap, tsamp, tstart_ind, nsamp;
                            tol_samples = RESAMPLE_TOL_SAMPLES,
                            max_order = RESAMPLE_MAX_ORDER, v0 = 0.0)
     # v = -(trial as given), so the plain sum tau + sum_n integral (v/c)^n below is
@@ -120,13 +128,18 @@ function _exact_remap_poly(accel, jerk, snap, tau, tsamp;
         return [0.0, 1.0], 0, true
     end
 
+    step = float(tsamp)
     vn = copy(v)
     u = polyadd([0.0, 1.0], polyint(vn) ./ CONST_C_VAL)
     order_used = 1
     for order in 2:max_order
         vn = polymul(vn, v)
         term = polyint(vn) ./ CONST_C_VAL^order
-        if maximum(abs.(polyval(tau, term))) / tsamp < tol_samples
+        peak = 0.0
+        @inbounds for i in 1:nsamp
+            peak = max(peak, abs(polyval((i - 1 + tstart_ind) * step, term)))
+        end
+        if peak / tsamp < tol_samples
             return u, order_used, true
         end
         u = polyadd(u, term)
@@ -152,25 +165,40 @@ function resample_ts_shift_snap(ts::AbstractVector, accel, jerk, snap, tsamp,
     if accel == 0 && jerk == 0 && snap == 0 && v0 == 0
         return ts, tstart_ind
     end
-    tau = (collect(0:(length(ts) - 1)) .+ tstart_ind) .* float(tsamp)
+    isempty(ts) && return ts, tstart_ind
+    N = length(ts)
+    step = float(tsamp)
     u_coeffs, order_used, converged = _exact_remap_poly(
-        accel, jerk, snap, tau, tsamp;
+        accel, jerk, snap, tsamp, tstart_ind, N;
         tol_samples = tol_samples, max_order = max_order, v0 = v0)
     if !converged
         @warn "resample_ts_shift_snap: exact-remap series did not converge " *
               "to $tol_samples samples within $max_order orders -- pass a " *
               "larger max_order, or shrink the campaign span/velocity."
     end
-    ts_new_indices = round.(Int, polyval(tau, u_coeffs) ./ tsamp)
-    resampled_tstart_ind = ts_new_indices[1]
-    ts_new_indices .-= ts_new_indices[1]
-    if minimum(diff(ts_new_indices)) < 0
-        error("resample map is not monotonic: the coefficients are too large " *
-              "for this offset from the anchor")
+    # Two scalar passes instead of the old N-long `tau`, `u` and index arrays.
+    # At N = 1.92e8 each of those is 1.4 GB, and a `--demod-grid` sweep paid
+    # them once per point; the remap is only a few flops per sample, so
+    # recomputing the indices is far cheaper than allocating and collecting
+    # several GiB.  The arithmetic and `round` are those of the old broadcasts.
+    first_idx = 0
+    prev_idx = 0
+    @inbounds for i in 1:N
+        idx_i = round(Int, polyval((i - 1 + tstart_ind) * step, u_coeffs) / tsamp)
+        i == 1 && (first_idx = idx_i)
+        if i > 1 && idx_i < prev_idx
+            error("resample map is not monotonic: the coefficients are too large " *
+                  "for this offset from the anchor")
+        end
+        prev_idx = idx_i
     end
-    ts_new = zeros(eltype(ts), ts_new_indices[end] + 1)
-    ts_new[ts_new_indices .+ 1] = ts            # +1: 0-based Python -> 1-based Julia
-    return ts_new, resampled_tstart_ind
+    last_idx = prev_idx
+    ts_new = zeros(eltype(ts), last_idx - first_idx + 1)
+    @inbounds for i in 1:N
+        idx_i = round(Int, polyval((i - 1 + tstart_ind) * step, u_coeffs) / tsamp)
+        ts_new[idx_i - first_idx + 1] = ts[i]
+    end
+    return ts_new, first_idx
 end
 
 # Thin wrappers, matching the Python API.
@@ -235,24 +263,42 @@ function _cumtrapz(y::AbstractVector, x::AbstractVector)
 end
 
 """
-    _integrate_voc_remap(voc_func, tau, tol_samples, tsamp; n0, n_max)
+    _integrate_voc_remap(voc_func, tsamp, tstart_ind, nsamp, tol_samples;
+                         n0, n_max)
 
 `u(tau) = int_0^tau dt'/(1+voc_func(t'))` by cumulative trapezoid on
 `[min(0,tau), max(0,tau)]`, quadrupling the sample count until the peak change
 over one refinement is below `tol_samples` samples.
+
+`tau` is generated from the sample index rather than materialised.  The old
+`_interp(tau, ...)` pair plus `u .- prev` allocated four N-long `Float64`
+arrays per refinement (5.7 GB at N = 1.92e8); the two buffers below are reused
+across refinements and the difference is reduced in the same loop that fills
+`u`.
 """
-function _integrate_voc_remap(voc_func, tau::AbstractVector, tol_samples, tsamp;
+function _integrate_voc_remap(voc_func, tsamp, tstart_ind, nsamp, tol_samples;
                               n0 = RESAMPLE_VOC_N0, n_max = RESAMPLE_VOC_NMAX)
-    lo = min(0.0, minimum(tau))
-    hi = max(0.0, maximum(tau))
-    hi == lo && return zeros(length(tau))
+    step = float(tsamp)
+    tau_first = tstart_ind * step
+    tau_last = (nsamp - 1 + tstart_ind) * step
+    lo = min(0.0, tau_first, tau_last)
+    hi = max(0.0, tau_first, tau_last)
+    hi == lo && return zeros(nsamp)
     n = n0
-    prev = nothing
+    u = Vector{Float64}(undef, nsamp)
+    prev = Vector{Float64}(undef, nsamp)
+    have_prev = false
     while true
         t_grid = _linspace(lo, hi, n)
         cum = _cumtrapz(1.0 ./ (1.0 .+ voc_func(t_grid)), t_grid)
-        u = _interp(tau, t_grid, cum) .- _interp(0.0, t_grid, cum)
-        if prev !== nothing && maximum(abs.(u .- prev)) / tsamp < tol_samples
+        zero_u = _interp(0.0, t_grid, cum)
+        worst = 0.0
+        @inbounds for i in 1:nsamp
+            ui = _interp((i - 1 + tstart_ind) * step, t_grid, cum) - zero_u
+            u[i] = ui
+            have_prev && (worst = max(worst, abs(ui - prev[i])))
+        end
+        if have_prev && worst / tsamp < tol_samples
             return u
         end
         if n >= n_max
@@ -261,7 +307,8 @@ function _integrate_voc_remap(voc_func, tau::AbstractVector, tol_samples, tsamp;
                   "residual error."
             return u
         end
-        prev = u
+        u, prev = prev, u
+        have_prev = true
         n = min(n * 4, n_max)
     end
 end
@@ -278,18 +325,28 @@ and output as the polynomial remapper.
 function resample_ts_shift_voc(ts::AbstractVector, voc_func, tsamp, tstart_ind;
                                tol_samples = RESAMPLE_TOL_SAMPLES)
     isempty(ts) && return ts, tstart_ind
-    tau = (collect(0:(length(ts) - 1)) .+ tstart_ind) .* float(tsamp)
-    u = _integrate_voc_remap(voc_func, tau, tol_samples, tsamp)
-    ts_new_indices = round.(Int, u ./ tsamp)
-    resampled_tstart_ind = ts_new_indices[1]
-    ts_new_indices .-= ts_new_indices[1]
-    if minimum(diff(ts_new_indices)) < 0
-        error("resample map is not monotonic: voc_func implies |v|/c >= 1 " *
-              "somewhere in this segment's span")
+    N = length(ts)
+    u = _integrate_voc_remap(voc_func, tsamp, tstart_ind, N, tol_samples)
+    # Scalar index passes, as in `resample_ts_shift_snap`: the old
+    # `round.(Int, u ./ tsamp)` index vector is another N-long allocation.
+    first_idx = 0
+    prev_idx = 0
+    @inbounds for i in 1:N
+        idx_i = round(Int, u[i] / tsamp)
+        i == 1 && (first_idx = idx_i)
+        if i > 1 && idx_i < prev_idx
+            error("resample map is not monotonic: voc_func implies |v|/c >= 1 " *
+                  "somewhere in this segment's span")
+        end
+        prev_idx = idx_i
     end
-    ts_new = zeros(eltype(ts), ts_new_indices[end] + 1)
-    ts_new[ts_new_indices .+ 1] = ts
-    return ts_new, resampled_tstart_ind
+    last_idx = prev_idx
+    ts_new = zeros(eltype(ts), last_idx - first_idx + 1)
+    @inbounds for i in 1:N
+        idx_i = round(Int, u[i] / tsamp)
+        ts_new[idx_i - first_idx + 1] = ts[i]
+    end
+    return ts_new, first_idx
 end
 
 """

@@ -41,7 +41,7 @@ function search_argtable!(s::ArgParseSettings)
             arg_type = String
             default = String[]
         "--demod-concurrency"
-            help = "Grid points searched at once under --demod-grid.  0 (the default) uses one slot per Julia thread, each search pinned to nthreads/slots threads -- so 16 points on 16 threads run 16 single-threaded searches concurrently.  This is faster than letting one search use every thread, because a demodulation is serial and the search's own chunk parallelism flattens well below nthreads().  1 restores the purely sequential driver.  The observation is still read ONCE either way; this is not one process per point"
+            help = "Grid points searched at once under --demod-grid.  0 (the default) uses one slot per Julia thread, each search pinned to nthreads/slots threads -- so 16 points on 16 threads run 16 single-threaded searches concurrently.  This is faster than letting one search use every thread, because a demodulation is serial and the search's own chunk parallelism flattens well below nthreads().  1 restores the purely sequential driver.  Each live slot also holds one demodulated amplitude array (N/2 ComplexF32, i.e. 4 bytes per input sample), so lower this to bound peak RSS on very long observations.  The observation is still read ONCE either way; this is not one process per point"
             arg_type = Int
             default = 0
         "--rednoise-startwidth"
