@@ -462,6 +462,47 @@ function _destroy_presto_fft_plan(p::_PrestoFFTPlan)
     return nothing
 end
 
+# FFTW allocates a plan's twiddle tables outside the Julia heap, so the GC
+# cannot see them and will not reclaim them while the cache holds the plan.
+# The tables scale with the transform length: measured ~0.74 GB per plan at
+# N = 1.92e8 samples on the PRESTO-library path (~4 bytes per sample), and
+# about twice that on the FFTW.jl fallback, whose plan also keeps the array it
+# was planned on.  The budget therefore charges 8 bytes per sample.
+#
+# That matters because the demodulation driver plans once per *distinct*
+# demodulated length, and `--demod-grid` produces a slightly different length
+# for every grid point (the remap's endpoint moves with accel/jerk/snap).  An
+# unbounded cache therefore pins one O(N) plan per grid point -- ~0.75 GB per
+# point on the 192M-sample fixture -- and the process eventually runs out of
+# RAM.  A byte budget instead keeps the cache bounded, which is the whole
+# "peak memory independent of the grid size" property the driver promises.
+#
+# A `Ref` so the regression test can shrink the budget and exercise eviction on
+# 512-sample transforms instead of allocating hundreds of MB.
+const PRESTO_FFT_PLAN_CACHE_BYTES = Ref(512 * 1024 * 1024)
+
+_presto_plan_bytes(N::Int) = 8 * N
+
+"""
+    _trim_presto_plans!(plans, reserve = 0)
+
+Drop cached plans until `reserve` more bytes fit in
+`PRESTO_FFT_PLAN_CACHE_BYTES`, destroying each evicted FFTW plan
+immediately (finalizers alone would leave the C memory alive until the next
+full GC).  Called *before* a new plan is built, so the transient peak is the
+budget rather than the budget plus one plan.
+"""
+function _trim_presto_plans!(plans::AbstractDict{Int}, reserve::Int = 0)
+    isempty(plans) && return nothing
+    used = sum(_presto_plan_bytes, keys(plans); init = 0)
+    while used + reserve > PRESTO_FFT_PLAN_CACHE_BYTES[] && !isempty(plans)
+        k = first(keys(plans))
+        used -= _presto_plan_bytes(k)
+        _destroy_presto_fft_plan(pop!(plans, k))
+    end
+    return nothing
+end
+
 # FFTW_ESTIMATE = 1 << 6, FFTW_MEASURE = 0; PRESTO's `fftwcall()` uses the
 # former above 16384 points and the latter at or below it.
 const _FFTW_MEASURE = UInt32(0)
@@ -489,7 +530,7 @@ function _make_presto_fft_plan(data::Vector{ComplexF32}, N::Int)
 end
 
 """
-    presto_fft_amps(x, plans::Dict{Int,Any}) -> Vector{ComplexF32}
+    presto_fft_amps(x, plans::AbstractDict{Int}) -> Vector{ComplexF32}
 
 Byte-for-byte port of PRESTO's `realfft()` (`src/fastffts.c`) for a forward
 transform.  The result has PRESTO's `.fft` layout: `N÷2` `ComplexF32` bins in
@@ -503,6 +544,15 @@ trig recursion is then transcribed operation for operation, including which
 intermediates are rounded to `Float32` before being widened.  On the PRESTO
 test series this reproduces `realfft`'s output bytes exactly.
 
+The cache is **bounded** (see `PRESTO_FFT_PLAN_CACHE_BYTES`): a plan's
+twiddles are FFTW-allocated, invisible to the GC, and O(`N`) each, so caching
+every length a `--demod-grid` sweep visits would retain one plan per grid
+point until the process exits.  Plans are evicted (and destroyed) when the
+budget is exceeded; the victim is whichever key the dictionary yields first,
+and the trim only runs when `N` is not already cached, so the plan about to be
+reused is never the one evicted.  Callers that need a different policy can
+pass their own dictionary and manage it.
+
 One caveat is inherited from PRESTO, not added here: for `N÷2 <= 16384`
 PRESTO asks FFTW for a `MEASURE` plan, and FFTW picks the fastest algorithm by
 timing it, so two runs of PRESTO's own `realfft` can differ in the last bits.
@@ -511,7 +561,7 @@ regime of a real demodulated observation (`N` in the 10^5..10^7 range), and
 there the match is exact.  (PRESTO switches to its own six-step FFT above
 2×10^8 complex points; that is far outside the demod range and not ported.)
 """
-function presto_fft_amps(x::AbstractVector{Float32}, plans::Dict{Int,Any})
+function presto_fft_amps(x::AbstractVector{Float32}, plans::AbstractDict{Int})
     N = length(x)
     iseven(N) || error("The number of time samples must be even (realfft requires it), got $N")
     N >= 2 || error("realfft needs at least two samples, got $N")
@@ -522,8 +572,12 @@ function presto_fft_amps(x::AbstractVector{Float32}, plans::Dict{Int,Any})
     # is that memcpy, and the complex FFT below is length N/2 -- not N.
     xbuf = x isa Vector{Float32} ? x : Vector{Float32}(x)
     data = copy(reinterpret(ComplexF32, xbuf))
-    plan = get!(plans, N) do
-        _make_presto_fft_plan(data, N)
+    plan = get(plans, N, nothing)
+    if plan === nothing
+        # Make room before planning, so the peak is the budget, not budget+plan.
+        _trim_presto_plans!(plans, _presto_plan_bytes(N))
+        plan = _make_presto_fft_plan(data, N)
+        plans[N] = plan
     end
     plan.n == N || error("FFT plan cache key/length mismatch: $(plan.n) != $N")
 

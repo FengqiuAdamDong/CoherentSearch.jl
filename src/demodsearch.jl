@@ -12,8 +12,8 @@
 # point) writes and re-reads ~5 files per grid point -- ~1100 for a 220-point
 # sweep -- and every one of them is a pure intermediate.  Here the observation
 # is read once and only the `.cohout` files are written, so peak memory is the
-# raw series plus one demodulated series plus one amplitude array, independent
-# of how many grid points there are.
+# raw series plus one demodulated series plus one amplitude array plus a
+# *bounded* FFT-plan cache, independent of how many grid points there are.
 
 """
     demod_main(a) -> Nothing
@@ -126,7 +126,12 @@ function demod_main(a)
         put!(caches, SearchCache())
     end
     pending = Tuple{Task,AbstractString,Float64}[]
-    plans = Dict{Int,Any}()          # PRESTO-compatible FFT plans, keyed by demodulated N
+    # PRESTO-compatible FFT plans, keyed by the demodulated N.  The remap gives
+    # every grid point its own length, so this would otherwise hold one O(N)
+    # FFTW plan (twiddles outside the Julia heap) per point -- `presto_fft_amps`
+    # keeps it inside `PRESTO_FFT_PLAN_CACHE_BYTES` by evicting and destroying
+    # plans when the budget is exceeded.
+    plans = Dict{Int,Any}()
 
     npoints = length(points) * length(dats)
     done = 0

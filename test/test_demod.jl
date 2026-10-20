@@ -101,6 +101,35 @@ end
     @test_throws ErrorException presto_fft_amps(randn(Float32, 511), Dict{Int,Any}())
 end
 
+@testset "presto_fft_amps: the plan cache is bounded" begin
+    # Regression for `--demod-grid` running out of RAM: the remap gives every
+    # grid point its own output length, so an unbounded per-N cache pinned one
+    # O(N) FFTW plan per point.  FFTW allocates those twiddles outside the Julia
+    # heap, so nothing ever reclaimed them.  Shrink the budget to two 512-sample
+    # plans and check that the cache stays inside it while the transforms stay
+    # correct.
+    old = CoherentSearch.PRESTO_FFT_PLAN_CACHE_BYTES[]
+    CoherentSearch.PRESTO_FFT_PLAN_CACHE_BYTES[] = 9000   # two ~4 kB plans
+    try
+        plans = Dict{Int,Any}()
+        xs = [randn(MersenneTwister(11 + i), Float32, 512 + 2i) for i in 1:8]
+        for x in xs
+            a = presto_fft_amps(x, plans)
+            ref = FFTW.rfft(x)
+            @test a[2:end] ≈ ref[2:(length(x) ÷ 2)] rtol = 1e-5
+            @test length(plans) <= 2
+        end
+        @test length(plans) == 2
+        # The first length was evicted; re-planning it must still work.
+        b = presto_fft_amps(xs[1], plans)
+        @test length(b) == length(xs[1]) ÷ 2
+        @test b[2:end] ≈ FFTW.rfft(xs[1])[2:(length(xs[1]) ÷ 2)] rtol = 1e-5
+        @test presto_fft_amps(xs[1], plans) == b   # and is now cached
+    finally
+        CoherentSearch.PRESTO_FFT_PLAN_CACHE_BYTES[] = old
+    end
+end
+
 @testset "presto_fft_amps is byte-identical to PRESTO's realfft" begin
     if !(HAS_REALFFT && CoherentSearch.presto_fftw_exact())
         @info "Skipping the byte-exact realfft comparison; PRESTO realfft or a matching libfftw3f not found" REALFFT CoherentSearch.presto_fftw_library()

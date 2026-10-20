@@ -1069,8 +1069,8 @@ raw .dat held in RAM  ->  exact time remap  ->  PRESTO realfft  ->  rednoise
 ```
 
 The observation is read **once**; peak memory is the raw series plus one
-demodulated series plus one amplitude array, independent of the grid size.
-Nothing but the `.cohout` files is written.
+demodulated series plus one amplitude array plus a bounded FFT-plan cache,
+independent of the grid size.  Nothing but the `.cohout` files is written.
 
 ```sh
 julia --project=. -t auto bin/coherent_search.jl OBS.dat \
@@ -1123,7 +1123,15 @@ julia --project=. -t auto bin/coherent_search.jl OBS.dat \
   at or below it.  Real demodulations are far above the threshold, so they pay
   only `ESTIMATE`; for `N = 6e6` that is 15 ms rather than the 35.5 s a
   `MEASURE` plan costs.  The plan is cached per demodulated length because each
-  grid point lands on its own `N'` (varying by hundreds of samples).
+  grid point lands on its own `N'` (varying by hundreds of samples), but the
+  cache holds a **byte budget**, not one plan per length forever: FFTW's
+  twiddle tables live outside the Julia heap at roughly 4–8 bytes per sample
+  per plan (the fallback path keeps the planned array too), so an unbounded
+  per-`N` cache pinned ~0.75 GB per grid point on the 192M-sample fixture and
+  a long sweep ran out of RAM.  Plans are now destroyed as the budget is
+  exceeded (see `PRESTO_FFT_PLAN_CACHE_BYTES` in `src/demod.jl`), which bounds
+  peak memory independently of the grid size at the cost of re-planning a point
+  whose length is not currently cached.
 
 **Why not one process per grid point.**  `demod/run_nsns_sweep.sh` does exactly
 that (and `bin/parallel_search.py` for `.fft` files), and it does scale better
