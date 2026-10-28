@@ -979,6 +979,8 @@ its YAML skipped), then writes the combined YAML itself.
 | `src/demod.jl` (package) | The exact time-remap resamplers, PRESTO's `.fft` packing, `presto_deredden!` and `demodulate_series`. Was `demod/resample.jl`; moved into the package so the in-memory driver uses the same code. |
 | `demod_dat.jl` | On-disk wrapper: apply the remap to one `.dat`/`.inf`; CLI + `demod_file`. |
 | `demod_grid.jl` | Batch, on disk: demodulate one observation at every row of a grid CSV, in one Julia process. |
+| `fold_demod.jl` | For each `.cohout`, demodulate at the ajs/circular point in its filename and fold at the detected period/frequency; infers the `.dat` from the stem unless `--dat` is given. Defaults to a 1024-bin fold with the Morello et al. best-boxcar S/N, masks known pulsars and their harmonics, and can DBSCAN-cluster candidates in spacing-normalized AJS+frequency. |
+| `predict_par_masks.py` | Machine-readable wrapper around `plot_corner_ajs.py`'s ajs-aware known-pulsar mask, used only by `fold_demod.jl --inf`. |
 | `src/demodsearch.jl` (package) | The in-memory driver behind `bin/coherent_search.jl --demod-grid` (Section 11). |
 | `pulsegen_gr.py` | Inject a full Damour–Deruelle binary pulsar into a `.dat`/`.inf` (+ `_truth.yaml`). |
 | `run_demod_search.sh` | End-to-end: inject → derive grid → nearest grid point → demod → search. |
@@ -1034,6 +1036,130 @@ julia --project=. -t auto bin/coherent_search.jl OBS.dat \
 `--demod-grid` may be repeated (hybrid grids emit one CSV per model).  It rejects
 `-o`, `--plot` and `--plotstem`; plot afterwards from the `.cohout` files with
 `bin/plot_candidates.jl`.  Section 11 has the details.
+
+### Folding the detected candidates
+
+`demod/fold_demod.jl` closes the loop: it reads the demodulation point from
+each `.cohout` filename, applies the same `CoherentSearch.demodulate_series`
+the search used, and folds the result at the candidate's detected frequency.
+Nothing intermediate is written -- the `.dat` is read once, demodulated in
+memory, and histogrammed into phase bins.
+
+```sh
+# Best candidate of every .cohout under the bundled output, 10 ms .. 1 s,
+# search S/N >= 6:
+julia --project=. demod/fold_demod.jl test/test_grid_ajs_efficacy/OUT \
+      --min-period 0.01 --max-period 1.0 --min-snr 6
+
+# One file, ten best candidates, explicit data series:
+julia --project=. demod/fold_demod.jl \
+      test/test_grid_ajs_efficacy/OUT/Ter5_DM238.60_demod_a-6.932130137_j-0.0001068209012_s-1.140293766e-08_red.cohout \
+      --dat test/test_grid_ajs_efficacy/Ter5_DM238.60.dat --top 10
+```
+
+The source `.dat` is inferred from the `.cohout` stem (`<stem>.dat` beside the
+cohout, under the input root, or one level up -- the last finds the bundled
+`OUT/` case); pass `--dat` to override.  Period/frequency and S/N windows
+default to 0..Inf, and `--top N` folds the N best surviving candidates per
+file (default 1; 0 = all).  Profiles and profile+waterfall PNGs go under
+`<input>/folds` (or `--outdir`), with `folds.csv` recording the candidate,
+model, and fold summary.  `--no-plot` writes only the text profiles.  The
+sub-integration waterfall uses reversed greys: **dark = more signal**, white =
+background/no signal; the profile and waterfall share the same 0..1 phase axis.
+
+`--jobs N` splits the `.cohout` list across N independent **processes**, each
+doing its own demodulation and fold, then merges their `folds.csv` rows.  With
+`--dbscan`, the parent first does the global clustering, writes
+`dbscan_selection.csv`, and then splits only the selected cluster
+representatives across the workers.  This is true process parallelism (no Julia
+threading needed) and is the fastest way through a large `OUT/` directory.
+Memory scales with `--jobs`: each worker
+holds its own `.dat` mapping and demodulated series, so start with 4 and watch
+RAM.  `--limit` is still a global cap (applied before the split).  A worker that
+finishes with no candidate passing the period/frequency/S/N windows or the
+known-pulsar mask exits with code 2; the parent reports it as a zero-fold shard
+rather than a failure, so filters that remove everything do not produce a wall
+of scary warnings.
+
+With no `--nbins` (the default, `--nbins 0`), the fold is made at 1024 bins and
+the **Morello et al. (2014, MNRAS 443, 1651)** boxcar S/N is optimised over
+widths 1, 2, 4, 8, 16, 32, 64, 128, 256:
+
+$$
+\mathrm{S/N}=\frac{1}{\sigma\sqrt{w}}\sum_{p_i\in W}(p_i-\bar b),
+$$
+
+where $W$ is a circular on-pulse window of $w$ bins and $\bar b$ and $\sigma$
+are the mean and standard deviation of the bins outside $W$.  Both the width
+and the window position are optimised.  The winning width $w$ is then used to
+downsample the profile and waterfall to $1024/w$ bins, rotating them so the
+winning window sits near phase 0.5.  The reported fold S/N is the winning
+boxcar S/N, and the plotted curve is the S/N of each downsampled window, so its
+peak equals the reported value.  Pass an explicit `--nbins N` to bypass the
+search and fold directly at $N$ bins with the robust IQR profile S/N instead.
+
+### Clustering candidates with DBSCAN
+
+`--dbscan` first applies the period/frequency/S/N windows and known-pulsar mask
+to every `.cohout`, then clusters the global surviving set in four dimensions:
+
+$$
+\left(\frac{a}{d_a},\ \frac{j}{d_j},\ \frac{s}{d_s},\ \frac{f}{d_f}\right)
+$$
+
+The AJS spacings $d_a,d_j,d_s$ are the median positive steps of the
+user-supplied `--spacing-csv` grid, for example:
+
+```sh
+--dbscan --spacing-csv test/test_grid_ajs_efficacy/my_grid_search/nsns.csv
+```
+
+The frequency spacing $d_f$ is `--freq-spacing`, a `frequency`/`freq` column in
+the CSV if present, or `1/T` from `--inf`/`--dat`.  The parsed spacings are
+printed and written to `<outdir>/dbscan_spacings.txt`, so the values used are
+reproducible.
+
+The fold step then keeps the top `--top N` candidates per cluster (default 1).
+DBSCAN noise is discarded unless `--dbscan-keep-noise` is given, in which case
+each noise point is a singleton cluster.  `--dbscan-eps` (default 1) is in
+units of the grid spacings; `--dbscan-minpts` (default 2) includes the point
+itself.  Clustering runs **once in the parent**; with `--jobs N` the parent
+then writes `dbscan_selection.csv` and shards only the selected cluster
+representatives across N folding workers.  Circular-model `.cohout` files are
+skipped by the clusterer because they have no AJS coordinates.
+
+```sh
+# Fold the best 2 candidates in every (ajs, frequency) cluster:
+julia --project=. demod/fold_demod.jl test/test_grid_ajs_efficacy/OUT \
+      --dbscan --spacing-csv test/test_grid_ajs_efficacy/my_grid_search/nsns.csv \
+      --top 2 --min-snr 6
+```
+
+### Cutting known pulsars
+
+Known pulsars are cut with the **same mechanism as `plot_corner_ajs.py`**:
+`--par` accepts `.par` files, directories, or quoted globs; `--par-harmonics N`
+also removes harmonics 2..N; and `--par-tol` / `--par-frac-tol` set the
+half-width (default `max(0.005, 5e-4*F0)` Hz, scaled by the harmonic number).
+With `--inf`, each known pulsar's searched frequency is predicted separately
+for every ajs trial point from the par's full orbit and the demodulation
+residual -- `predict_par_masks.py` calls the corner plot's own
+`predict_ajs_frequencies`, so the two tools cannot drift.  Without `--inf` the
+centre is F0 at PEPOCH.  The mask runs after the period/frequency/S/N windows
+and before `--top`, so the best surviving non-masked candidate is folded, and
+`folds.csv` records how many candidates each file lost.
+
+```sh
+# Drop the 1748-2446 pulsars and their first 12 harmonics:
+julia --project=. demod/fold_demod.jl test/test_grid_ajs_efficacy/OUT \
+      --par test/test_grid_ajs_efficacy/par_files --par-harmonics 12
+
+# Same, with the ajs-predicted mask centre at each trial point
+# (OBS.inf is the barycentered observation the search ran on):
+julia --project=. demod/fold_demod.jl test/test_grid_ajs_efficacy/OUT \
+      --par test/test_grid_ajs_efficacy/par_files --par-harmonics 12 \
+      --inf OBS.inf
+```
 
 Requires Julia with the `CoherentSearch.jl` project, a Python with
 numpy/scipy/matplotlib/yaml, PRESTO's `realfft`/`rednoise` (shell pipeline
