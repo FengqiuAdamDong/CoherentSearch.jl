@@ -1,7 +1,8 @@
 using Test
 using FFTW: FFTW
 using CoherentSearch
-using CoherentSearch: output_path, plot_stem, main, _plans!, Workspace, parse_cmdline
+using CoherentSearch: output_path, plot_stem, spectrum_path, main, _plans!, Workspace,
+                      parse_cmdline
 using Logging: with_logger, NullLogger
 
 # ---------------------------------------------------------------------------
@@ -253,5 +254,48 @@ end
             main(vcat(base, ["--outdir", od]))
         end
         @test isfile(joinpath(od, "solo.cohout"))
+    end
+end
+
+@testset "spectrum_path and --spectrum" begin
+    # Candidate file first; stdout falls back beside the input FFT.
+    @test spectrum_path("", joinpath("d", "x.fft")) == joinpath("d", "x.spectrum")
+    @test spectrum_path(joinpath("o", "a.cohout"), joinpath("d", "x.fft")) ==
+          joinpath("o", "a.spectrum")
+    @test spectrum_path(joinpath("o", "a.txt"), "x.fft") == joinpath("o", "a.txt.spectrum")
+
+    mktempdir() do dir
+        p, T = write_synthetic_fft(dir, "spec")
+        base = [p, "--noplot", "--noprogress", "--nowisdom", "--nharms", "8",
+                "--blocksize", "64", "--threshold", "0.0", "--ncands", "3",
+                "--lofreq", string(200 / T), "--hifreq", string(240 / T)]
+        plain = joinpath(dir, "plain.cohout")
+        with_logger(NullLogger()) do
+            main(vcat(base, ["-o", plain]))
+        end
+        with_logger(NullLogger()) do
+            main(vcat(base, ["-o", joinpath(dir, "with.cohout"), "--spectrum"]))
+        end
+        # Candidates must not move: the .cohout files are byte-identical.
+        @test read(plain) == read(joinpath(dir, "with.cohout"))
+        spath = joinpath(dir, "with.spectrum")
+        @test isfile(spath)
+        hdr = String(read(spath)[1:8192])
+        n = parse(Int, match(r"total=(\d+)", hdr).captures[1])
+        K = length(split(match(r"decimations=([0-9,]+)", hdr).captures[1], ","))
+        @test filesize(spath) == 8192 + K * n * 4
+
+        # Candidates on stdout: the spectrum lands beside the input FFT.
+        open(joinpath(dir, "out.txt"), "w") do io
+            with_logger(NullLogger()) do
+                redirect_stdout(io) do
+                    main(vcat(base, ["--spectrum"]))
+                end
+            end
+        end
+        @test isfile(joinpath(dir, "spec.spectrum"))
+
+        # Rejected before any CUDA load.
+        @test_throws ArgumentError main(vcat(base, ["--gpu", "--spectrum"]))
     end
 end

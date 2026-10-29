@@ -1380,12 +1380,13 @@ function _region!(::CUDABackend, ft::FFTFile, params::SearchParams,
                   Nprof::Integer, nchunks::Integer, nt::Integer,
                   cstarts::AbstractVector{Int};
                   threshold::Real, norm, metricstats, progress::Symbol,
-                  dplans::AbstractVector)
+                  dplans::AbstractVector, spectrum=nothing)
     params.sigma === :analytic || error(
         "the CUDA backend requires sigma = :analytic; the measured scale is a " *
         "per-chunk MAD with no device implementation yet (docs/gpu_design.md stage 4)")
     norm === nothing || error("the CUDA backend does not support --normalize yet")
     metricstats === nothing || error("the CUDA backend does not support --metricstats yet")
+    spectrum === nothing || error("the CUDA backend does not support --spectrum yet")
 
     WT = eltype(dplans[1].W)
     _check_device_memory(ft, params, Nprof, WT)

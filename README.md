@@ -546,6 +546,44 @@ recovered afterwards by refolding each reported candidate — see
 multiplies every width's score equally and so cannot change which one
 wins, which is what lets the width be recovered from an isolated profile.
 
+### Per-trial power spectrum (`--spectrum`)
+
+`--spectrum` writes *every* trial's S/N — not just the ones above threshold — as
+a small power-spectrum file beside the candidates (`<stem>.spectrum`, or beside
+the input FFT when candidates go to stdout). It is one file: an 8192-byte ASCII
+header, then one little-endian `Float32` array per decimation rung in ascending
+`k`, each `total` values long and starting at `8192 + (i-1)*4*total`.
+
+Each array is a *homogeneous* statistic on that rung's own trial grid: rung `k`
+covers searched frequencies `[k*lofreq, k*hifreq]` with `f0 = k*r_lo/T` and
+`df = k*lodr/T`, and holds the peak boxcar matched-filter S/N `z` of each trial,
+the same quantity as the `.cohout` `'S/N'` column. The arrays are deliberately
+**not** aggregated across rungs: every `(phase, width)` score is `N(0,1)` in
+white noise, but the max over `2*nbins*widths` samples gives each rung its own
+false-alarm floor (measured at FAP=1e-4: 5.13 at `k=1`, 4.86 at `k=6`), so a max
+across sections would mix statistics. Rungs that stop at Nyquist leave the rest
+of their array `NaN`; the `k=1` section is always complete. With `--normalize`
+the file keeps the raw metric (one scale per rung) while `.cohout` reports the
+normalised `z`.
+
+The header carries the conversion to a whitened FFT power, which is what a
+spectrum plot needs. Coherent harmonic summing gives `sum_h |A_h|^2 = z^2/2`;
+spread equally over `H` harmonics, the mean whitened power per harmonic is
+`P_h = 1 + z^2/(2H)`, and for the fundamental alone `P = 1 + z^2/2` (power is
+`|amp|^2` at one-sided bin `b/T`, mean 1 in white noise). A bin at power `P`
+carries an excess S/N of `P-1`. The header tabulates:
+
+| z | 5 | 6 | 7 | 8 | 10 | 12 |
+|---|---|---|---|---|---|---|
+| P(H=1) | 13.5 | 19.0 | 25.5 | 33.0 | 51.0 | 73.0 |
+| P(H=60) | 1.21 | 1.30 | 1.41 | 1.53 | 1.83 | 2.20 |
+
+The cost is `4 bytes × rungs × trials` held in RAM while the search runs:
+~200 MB for the bench preset (`--preset bench`, 0.1–200 Hz, `T ≈ 2097 s`),
+~9.5 GB for a 26 ks observation over a full band — narrow the band on long
+observations (a warning fires above 1 GiB). `--spectrum` is CPU only; `--gpu`
+rejects it rather than silently omitting the file.
+
 ### Candidate profile plots
 
 With `--plot`, the CLI reconstructs and plots the pulse profile of every
@@ -977,6 +1015,7 @@ of your `.fft`; it does not fit a 4 GB card alongside a 1.29 GiB file).
 | `--sigma analytic` | required (the default). `--sigma measured` needs a device MAD and errors out |
 | `--normalize` | not supported yet; errors out |
 | `--metricstats` | not supported yet; errors out |
+| `--spectrum` | not supported yet; errors out (CPU only) |
 | everything else | as on the CPU |
 
 Each of these errors clearly rather than silently doing something different.

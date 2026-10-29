@@ -515,9 +515,12 @@ end
             CoherentSearch.main([joinpath(dir, "disk_red.fft"), "--nharms", "8",
                                  "--threshold", "0.0", "--nowisdom", "--noprogress",
                                  "--lofreq", "0.5", "--hifreq", "2.0",
-                                 "--blocksize", "64", "-o", diskcoh])
+                                 "--blocksize", "64", "--spectrum", "-o", diskcoh])
         end
         @test read(joinpath(memout, memfile), String) == read(diskcoh, String)
+        # `--spectrum` rides the same per-point search; the demod driver derives
+        # the spectrum path from the .cohout one.
+        @test isfile(joinpath(dir, "disk.spectrum"))
     end
 end
 

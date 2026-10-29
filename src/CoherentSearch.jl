@@ -55,6 +55,7 @@ export SearchParams, Candidate, search, search_block, block_metrics, coherent_pr
        SearchCache,
        metricstats_summary, metricstats_windows, hist_quantile,
        MetricNorm, build_metricnorm,
+       Spectrum, write_spectrum,
        proftype, phase_reset!, phase_times, PHASE_NAMES
 include("search.jl")
 
@@ -129,7 +130,7 @@ using PrecompileTools: @setup_workload, @compile_workload
     # decimation factors cost a little workload runtime and no extra compilation.
     _argv = [_fftpath, "--noprogress", "--threshold", "1e9",
              "--nharms", "8", "--blocksize", "64", "--lofreq", "0.6",
-             "--hifreq", "0.64", "--nowisdom",
+             "--hifreq", "0.64", "--nowisdom", "--spectrum",
              "-o", joinpath(_dir, "synthetic.cohout")]
     # The demodulation driver needs its own tiny `.dat`/`.inf` pair and a 1-row
     # grid CSV, in the same temp directory.  Small on purpose: this only has to
@@ -161,9 +162,13 @@ using PrecompileTools: @setup_workload, @compile_workload
         # constant, not noise, so the analytic-sigma sanity check legitimately
         # fires — and a warning from inside precompilation would be alarming
         # noise.  Running it here is deliberate: it caches that path too.
+        # The spectrum sink is a different specialization of the whole search
+        # loop, and `--spectrum` is a documented option: without this a first
+        # `--spectrum` run would recompile the hot loop (~1 min) in the CLI.
         with_logger(NullLogger()) do
             search(_ft, _p; lobin = 200, hifreq = 210 / _ft.T, blocksize = 64,
-                   threshold = 1e9, progress = :none, wisdom = false, cache = _cache)
+                   threshold = 1e9, progress = :none, wisdom = false, cache = _cache,
+                   spectrum = Spectrum())
         end
         # …then the whole CLI, so ArgParse's table and `main` are cached too.
         # Silenced: the workload's @info output would otherwise be echoed as

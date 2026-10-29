@@ -445,6 +445,146 @@ function ladder_boxcar_widths(nbins::Integer, k::Integer, params::SearchParams)
     return isempty(pruned) ? ws : pruned
 end
 
+# ---------------------------------------------------------------------------
+# Per-trial power-spectrum output (`--spectrum`).
+#
+# One Float32 array per decimation rung, holding every trial's raw S/N on that
+# rung's own trial grid.  Nothing is aggregated across rungs: each array is one
+# homogeneous statistic (one k, one harmonic count, one boxcar bank), which is
+# the point -- a band-wide max across them would mix distributions whose
+# measured false-alarm floors differ (FAP=1e-4: 5.13 at k=1 vs 4.86 at k=6).
+#
+# The arrays are `total` long and NaN-padded: a rung that stops at Nyquist
+# leaves the rest NaN.  That is also why there is no per-rung length or offset
+# arithmetic anywhere -- the file is exactly K * total Float32s.  `Spectrum()`
+# is constructed empty and filled by `search`, like `MetricStats`.
+# ---------------------------------------------------------------------------
+
+const _SPECTRUM_HEADER = 8192          # bytes; fixed so the payload offset is known
+
+mutable struct Spectrum
+    total::Int
+    r_lo::Float64
+    r_hi::Float64
+    lodr::Float64
+    lofreq::Float64
+    hifreq::Float64
+    lobin::Int
+    nharms::Int
+    decimations::Vector{Int}
+    vals::Vector{Vector{Float32}}      # one per decimation; NaN32 = not scored
+end
+
+Spectrum() = Spectrum(0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, Int[], Vector{Float32}[])
+
+"""
+    _spectrum_init!(s, params, r_lo, r_hi, lodr, total, lofreq, hifreq, lobin)
+
+Lay out and allocate the per-rung arrays: `total` values per decimation, NaN
+prefilled.  Called once by [`search`](@ref) when a [`Spectrum`](@ref) is given.
+"""
+function _spectrum_init!(s::Spectrum, params::SearchParams, r_lo::Real, r_hi::Real,
+                         lodr::Real, total::Integer, lofreq::Real, hifreq::Real,
+                         lobin::Integer)
+    first(params.decimations) == 1 || throw(ArgumentError(
+        "spectrum output requires decimations[1] == 1; got $(params.decimations)"))
+    s.total = Int(total)
+    s.r_lo = Float64(r_lo)
+    s.r_hi = Float64(r_hi)
+    s.lodr = Float64(lodr)
+    s.lofreq = Float64(lofreq)
+    s.hifreq = Float64(hifreq)
+    s.lobin = Int(lobin)
+    s.nharms = params.nharms
+    s.decimations = copy(params.decimations)
+    nbytes = length(s.decimations) * s.total * sizeof(Float32)
+    nbytes > (1 << 30) && @warn "spectrum output needs $(round(nbytes / 2^30; digits = 2)) GiB in RAM " *
+                                "($(length(s.decimations)) rungs x $(s.total) trials); " *
+                                "narrow the band or reduce --maxdecim"
+    s.vals = [fill(NaN32, s.total) for _ in s.decimations]
+    return s
+end
+
+# One store per trial.  The `nothing` union gives separate specializations, so
+# the branch folds away entirely when the option is off.
+@inline _spectrum_put!(v::Union{Nothing,Vector{Float32}}, i::Integer, x::Real) =
+    v === nothing ? nothing : (@inbounds v[i] = Float32(x))
+
+function _spectrum_header(s::Spectrum, ft::FFTFile, params::SearchParams;
+                          threshold::Real, normalize::Bool)
+    io = IOBuffer()
+    println(io, "# CoherentSearch.jl per-trial spectrum: z = peak boxcar matched-filter S/N")
+    println(io, "# format: ", _SPECTRUM_HEADER, "-byte ASCII header (NUL padded), then one")
+    println(io, "#         little-endian Float32 array per decimation rung, n values each;")
+    println(io, "#         array i starts at ", _SPECTRUM_HEADER, " + (i-1)*4*n, with n=total")
+    @printf(io, "# input: N=%d dt=%.17g s T=%.17g s nyquist_hz=%.17g\n",
+                       ft.N, ft.inf.dt, ft.T, ft.N / (2 * ft.T))
+    @printf(io, "# grid: lofreq=%.17g hifreq=%.17g lobin=%d nharms=%d hidr=%.17g lodr=%.17g bins\n",
+                       s.lofreq, s.hifreq, s.lobin, s.nharms, params.hidr, s.lodr)
+    @printf(io, "#       decimations=%s total=%d m=%d precision=%s sigma=%s\n",
+                       join(s.decimations, ","), s.total, params.m,
+                       params.precision, params.sigma)
+    @printf(io, "#       threshold=%.17g gatemargin=%.17g normalize=%s\n",
+                       threshold, params.boxcar_gatemargin, normalize)
+    println(io, "# statistic: z is the trial's coherent harmonic-sum S/N, the same quantity as")
+    println(io, "#   the .cohout 'S/N' column (the max over the profile's phases and the rung's")
+    println(io, "#   boxcar widths; with --normalize, .cohout reports the normalised z while this")
+    println(io, "#   file keeps the raw metric, so each section stays one homogeneous scale).")
+    println(io, "#   A .cohout row with '#Harm'=H appears in the section whose")
+    println(io, "#   k=nharms/H, at f=f0+j*df.  Every (phase,width) score is N(0,1) in white")
+    println(io, "#   noise; the max over 2*nbins*widths samples gives a rung-dependent floor")
+    println(io, "#   (measured FAP=1e-4: 5.13 at k=1 .. 4.86 at k=6), so the sections are not")
+    println(io, "#   interchangeable.")
+    println(io, "# whitened FFT powers (mean power 1; power=|amp|^2 at one-sided bin b/T):")
+    println(io, "#   sum_h |A_h|^2 = z^2/2 ; equal over H: P_h = 1 + z^2/(2H) ; one: P = 1 + z^2/2")
+    println(io, "#   a bin at power P carries an excess S/N of P-1 (ideal matched filter)")
+    println(io, "#   z      :  5.0   6.0   7.0   8.0   10.0   12.0")
+    println(io, "#   P(H=1) : 13.5  19.0  25.5  33.0   51.0   73.0")
+    println(io, "#   P(H=60):  1.21  1.30  1.41  1.53   1.83   2.20")
+    for (i, k) in enumerate(s.decimations)
+        Hk = fld(s.nharms, k)
+        off = _SPECTRUM_HEADER + (i - 1) * 4 * s.total
+        @printf(io, "#rung k=%d Hk=%d nbins=%d widths=%s f0=%.17g df=%.17g n=%d offset=%d\n",
+                           k, Hk, 2Hk, join(ladder_boxcar_widths(2Hk, k, params), ","),
+                           k * s.r_lo / ft.T, k * s.lodr / ft.T, s.total, off)
+    end
+    println(io, "# NaN = trial not scored for that rung (k*f at or past Nyquist); the k=1 section")
+    println(io, "# is complete.  Values below threshold-gatemargin may be the Float32 gate")
+    println(io, "# estimate (relative error < 1e-6); --normalize does not change these values.")
+    println(io, "# end")
+    txt = String(take!(io))
+    ncodeunits(txt) <= _SPECTRUM_HEADER || error(
+        "spectrum header overflow ($(ncodeunits(txt)) > $_SPECTRUM_HEADER bytes)")
+    return txt
+end
+
+"""
+    write_spectrum(spec, path, ft, params; threshold=params.threshold, normalize=false)
+
+Write a filled [`Spectrum`](@ref) to `path`: the fixed 8192-byte ASCII header
+(statistic and whitened-FFT power table included), then one little-endian
+Float32 array per decimation rung in ascending `k`.  No timestamp or host
+information goes in, so two identical runs produce identical files.
+"""
+function write_spectrum(s::Spectrum, path::AbstractString, ft::FFTFile,
+                        params::SearchParams;
+                        threshold::Real=params.threshold, normalize::Bool=false)
+    if s.total == 0
+        @warn "spectrum output requested but the band has no trials; no file written"
+        return nothing
+    end
+    hdr = _spectrum_header(s, ft, params; threshold, normalize)
+    open(path, "w") do io
+        write(io, hdr)
+        write(io, zeros(UInt8, _SPECTRUM_HEADER - ncodeunits(hdr)))   # NUL padding
+        for v in s.vals
+            write(io, v)
+        end
+    end
+    @info "Wrote spectrum" path = path trials = s.total rungs = length(s.vals)
+    return path
+end
+
 const _BOXCAR_SIGMA_SAMPLES = 8192     # bins subsampled per block to fix the noise σ
 
 """
@@ -1913,13 +2053,18 @@ trial's (raw) metric is gathered into a [`BlockMetricStats`](@ref) for this
 [`MetricNorm`](@ref) `norm` is passed, each trial's raw metric is normalised to a
 significance `z` before the `threshold` test, and `z` (not the raw metric) is
 recorded in the candidate — the `--normalize` adaptive-threshold path.
+
+When a `vals` vector is passed, each scored trial's raw metric is also stored at
+`vals[t0 + j]` — the per-trial [`Spectrum`](@ref) sink.  Trials past Nyquist keep
+their NaN, and `t0` is the chunk's global trial offset.
 """
 function decim_pass!(out::Vector{Candidate}, ws::Workspace, db::DecimBuf, ft::FFTFile,
                      params::SearchParams, rstart::Real, lodr::Real, n::Integer;
                      threshold::Real=params.threshold, block::Integer=0,
                      stats::Union{Nothing,Vector{BlockMetricStats}}=nothing,
                      hist::Union{Nothing,MetricHistogram}=nothing,
-                     norm::Union{Nothing,MetricNorm}=nothing, exactcut::Real=-Inf)
+                     norm::Union{Nothing,MetricNorm}=nothing, exactcut::Real=-Inf,
+                     vals::Union{Nothing,Vector{Float32}}=nothing, t0::Integer=0)
     k = db.k
     Hk = db.Hk
     nbins = 2Hk
@@ -1957,6 +2102,7 @@ function decim_pass!(out::Vector{Candidate}, ws::Workspace, db::DecimBuf, ft::FF
         r_dec = k * (rstart + (j - 1) * lodr)
         r_dec < nyq || continue                       # fundamental past Nyquist
         mval = db.bcbatch.mvals[j]
+        _spectrum_put!(vals, t0 + j, mval)
         if mbuf !== nothing
             push!(mbuf, mval)
             hist === nothing || _hist_push!(hist, mval)
@@ -2034,7 +2180,8 @@ function _search_region!(ft::FFTFile, params::SearchParams,
                          cstarts::AbstractVector{Int};
                          threshold::Real, norm::Union{Nothing,MetricNorm},
                          metricstats::Union{Nothing,MetricStats}, progress::Symbol,
-                         dplans::AbstractVector)
+                         dplans::AbstractVector,
+                         spectrum::Union{Nothing,Spectrum}=nothing)
     collect_stats = metricstats !== nothing
     # Hoisted out of the chunk loop: a `Symbol` compare per chunk would be free,
     # but making it a `Bool` here keeps the hot branch trivially predictable.
@@ -2072,6 +2219,8 @@ function _search_region!(ft::FFTFile, params::SearchParams,
                 nothing
             mbuf = collect_stats ? Vector{Float64}(undef, Nprof) : nothing
             P = eltype(ws.profs)
+            # Per-trial spectrum sink for the base pass (k=1); `nothing` when off.
+            vspec1 = spectrum === nothing ? nothing : spectrum.vals[1]
             c = t
             while c <= nchunks
                 i0 = cstarts[c]
@@ -2097,6 +2246,7 @@ function _search_region!(ft::FFTFile, params::SearchParams,
                     hists[1][_window_index(wedges[1], rmean / ft.T)] : nothing
                 @phase 5 for j in 1:n
                     metric = ws.bcbatch.mvals[j]
+                    _spectrum_put!(vspec1, i0 + j, metric)
                     if collect_stats
                         mbuf[j] = metric
                         _hist_push!(basehist, metric)
@@ -2115,12 +2265,16 @@ function _search_region!(ft::FFTFile, params::SearchParams,
                 end
                 # Harmonic-decimation multi-frequency passes (k > 1), re-using the
                 # base harmonic amplitudes already in ws.ftprofs (see docs/decimation_design.md).
-                for db in ws.decims
+                for (di, db) in enumerate(ws.decims)
                     whist = collect_stats ?
                         hists[db.k][_window_index(wedges[db.k], db.k * rmean / ft.T)] : nothing
+                    # `spectrum.vals` is aligned with `params.decimations`, whose
+                    # first entry is 1 (enforced in `_spectrum_init!`), and
+                    # `ws.decims` is `filter(>(1), params.decimations)` in order.
+                    vspec = spectrum === nothing ? nothing : spectrum.vals[1 + di]
                     decim_pass!(out, ws, db, ft, params, rstart, lodr, n;
                                 threshold=threshold, block=c, stats=stats, hist=whist, norm=norm,
-                                exactcut=exactcut)
+                                exactcut=exactcut, vals=vspec, t0=i0)
                 end
                 atomic_add!(done, 1)
                 # One task owns the display (avoids interleaved \r writes); it reads
@@ -2363,6 +2517,13 @@ per-`k` and per-`(k, log-spaced searched-frequency window)` for empirical
 (frequency-resolved) quantiles — the opt-in `--metricstats` diagnostic.  The
 candidate results are identical whether or not `metricstats` is collected.
 
+If a [`Spectrum`](@ref) is supplied as `spectrum`, the raw S/N of *every* trial
+is also recorded into it: one Float32 array per decimation rung, on that rung's
+own trial grid (the k=1 array spans `[lofreq, hifreq]`; deeper rungs stop at
+Nyquist and leave NaN).  [`write_spectrum`](@ref) documents the file format and
+the S/N-to-whitened-power conversion.  Passing a `Spectrum` does not change the
+candidates.
+
 If `normalize` is set, the search runs in **two passes**: pass 1 measures the
 per-`(k, frequency window)` noise statistics (as `metricstats` does — the same
 `metricstats` sink is filled if given), pass 2 builds a [`MetricNorm`](@ref) from
@@ -2385,6 +2546,7 @@ function search(ft::FFTFile, params::SearchParams=SearchParams();
                 harm_remove::Bool=true, numharm::Integer=16, harm_tol::Real=1.0,
                 progress::Symbol=:none,
                 metricstats::Union{Nothing,MetricStats}=nothing,
+                spectrum::Union{Nothing,Spectrum}=nothing,
                 normalize::Bool=false, verbose::Bool=false,
                 wisdom::Bool=true, wisdom_file::Union{Nothing,AbstractString}=nothing,
                 cache::Union{Nothing,SearchCache}=nothing,
@@ -2405,6 +2567,8 @@ function search(ft::FFTFile, params::SearchParams=SearchParams();
 
     total = max(0, floor(Int, (r_hi - r_lo) / lodr) + 1)
     total == 0 && return Candidate[]
+    spectrum === nothing ||
+        _spectrum_init!(spectrum, params, r_lo, r_hi, lodr, total, lofreq, hifreq, lobin)
     # `blocksize = 0` means "this backend's default", which is 2048 on the CPU
     # and 65536 on the GPU -- see `CPU_DEFAULT_BLOCKSIZE`/`GPU_DEFAULT_BLOCKSIZE`
     # for why they differ by 32x.  Resolving it here rather than in the CLI keeps
@@ -2497,7 +2661,7 @@ function search(ft::FFTFile, params::SearchParams=SearchParams();
         _region!(backend, ft, params, workspaces, nbins, r_lo, r_hi, lodr,
                  total, Nprof, nchunks, nt, cstarts;
                  threshold=Inf, norm=nothing, metricstats=normstats, progress=progress,
-                 dplans=dplans)
+                 dplans=dplans, spectrum=spectrum)
         norm = build_metricnorm(normstats)
         @info "Built in-situ normalisation model; searching (pass 2/2)" windows=normstats.nwin
     end
@@ -2508,7 +2672,7 @@ function search(ft::FFTFile, params::SearchParams=SearchParams();
                      total, Nprof, nchunks, nt, cstarts;
                      threshold=threshold, norm=norm,
                      metricstats=(normalize ? nothing : metricstats), progress=progress,
-                     dplans=dplans)
+                     dplans=dplans, spectrum=(normalize ? nothing : spectrum))
 
     ntotal = length(cands)
     @info "Search complete; post-processing candidates" total_above_threshold=ntotal

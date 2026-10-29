@@ -4,6 +4,7 @@ using Test
     include("test_fourierinterp.jl")
     include("test_fileio.jl")
     include("test_search.jl")
+    include("test_spectrum.jl")
     include("test_candidate.jl")
     include("test_cli.jl")
     include("test_demod.jl")

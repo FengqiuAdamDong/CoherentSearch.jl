@@ -195,7 +195,9 @@ function demod_main(a)
                 # search at once, each pinned to `maxthreads` threads.
                 if nconc == 1
                     cands = search_one(ft, params, a, cache, backend;
-                                       maxthreads = 0, outfile = outfile)
+                                       maxthreads = 0, outfile = outfile,
+                                       spectrumfile = a["spectrum"] ?
+                                           spectrum_path(outfile, ft.path) : nothing)
                     write_candidates(cands, outfile, a["threshold"])
                 else
                     _demod_submit!(pending, caches, ft, params, a, backend, outfile,
@@ -268,7 +270,9 @@ function _demod_submit!(pending, caches, ft, params, a, backend, outfile, T,
     c = take!(caches)
     t = Threads.@spawn begin
         try
-            search_one(ft, params, a, c, backend; maxthreads = maxthreads, outfile = outfile)
+            search_one(ft, params, a, c, backend; maxthreads = maxthreads, outfile = outfile,
+                       spectrumfile = a["spectrum"] ?
+                           spectrum_path(outfile, ft.path) : nothing)
         finally
             put!(caches, c)
         end

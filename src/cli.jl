@@ -144,6 +144,9 @@ function search_argtable!(s::ArgParseSettings)
         "--normalize"
             help = "Adaptive threshold: a first pass measures the per-(decimation,frequency) noise, then the metric is normalised to a significance before thresholding (--threshold is then in noise-sigma units, comparable across decimations). Doubles the runtime."
             action = :store_true
+        "--spectrum"
+            help = "Also write every trial's S/N as a power spectrum: one Float32 array per decimation rung on that rung's own trial grid, in <stem>.spectrum with an ASCII header giving the statistic and the S/N -> whitened-FFT power conversion. CPU only; holds 4 bytes x rungs x trials in RAM (~200 MB at the bench setting, ~9.5 GB for a 26 ks full-band run)."
+            action = :store_true
         "--nowisdom"
             help = "Do not import/export the FFTW plan-wisdom cache (planning is re-measured every run)"
             action = :store_true
@@ -155,7 +158,7 @@ function search_argtable!(s::ArgParseSettings)
             help = "Plot the candidate pulse profiles. Off by default: it loads CairoMakie (~9 s) and holds every input's mmap live until the end of the run, neither of which a pipeline wants. Plot afterwards from the candidate files with bin/plot_candidates.jl"
             action = :store_true
         "--gpu"
-            help = "Run the search on a CUDA GPU.  Loads CUDA.jl on demand (~6 s once per invocation, amortised across a multi-file run).  Requires --sigma analytic (the default); --normalize and --metricstats are CPU-only for now.  Candidates are NOT bit-identical to the CPU path -- the GPU sums the same kernel in a different order and agrees to ~2e-7 -- so compare candidate lists, not file bytes"
+            help = "Run the search on a CUDA GPU.  Loads CUDA.jl on demand (~6 s once per invocation, amortised across a multi-file run).  Requires --sigma analytic (the default); --normalize, --metricstats and --spectrum are CPU-only for now.  Candidates are NOT bit-identical to the CPU path -- the GPU sums the same kernel in a different order and agrees to ~2e-7 -- so compare candidate lists, not file bytes"
             action = :store_true
         "--noplot"
             help = "Accepted and ignored -- plotting is already off unless --plot is given. Kept so existing pipelines and scripts do not break"
@@ -215,6 +218,9 @@ function parse_cmdline(argv)
         instead written beside it as <fftfile-without-.fft>.cohout.  --outdir
         redirects those .cohout files into one directory (and selects .cohout
         naming even for a single file).  `bin/sift_candidates.py` reads .cohout.
+        --spectrum adds a <stem>.spectrum beside each candidate file (or the input
+        FFT when candidates go to stdout): one Float32 array per decimation rung,
+        every trial's S/N, with an ASCII header defining the statistic.
 
         PLOTTING is OFF by default and enabled with --plot, at which point it is
         deferred: all searches run first, and the plotting backend (CairoMakie) is
@@ -260,6 +266,9 @@ function resolve_backend(a)
         a["normalize"] && error("--gpu does not support --normalize yet (it needs the " *
                                 "two-pass per-(k,frequency) statistics); run on the CPU.")
         a["metricstats"] && error("--gpu does not support --metricstats yet; run on the CPU.")
+        a["spectrum"] && throw(ArgumentError(
+            "--spectrum is CPU-only: the GPU path does not stage per-trial metrics " *
+            "for output; run on the CPU."))
         @info "Loading CUDA (once per invocation)"
         try
             @eval Main using CUDA
@@ -392,7 +401,8 @@ function main(argv)
         nfiles > 1 && @info "File $i of $nfiles" file=path
         ft = FFTFile(path)
         outfile = output_path(path, a["outputfilenm"], outdir, nfiles)
-        cands = search_one(ft, params, a, cache, backend)
+        spectrumfile = a["spectrum"] ? spectrum_path(outfile, path) : nothing
+        cands = search_one(ft, params, a, cache, backend; spectrumfile = spectrumfile)
         write_candidates(cands, outfile, a["threshold"])
         if a["plot"] && !isempty(cands)
             push!(toplot, (ft, cands, plot_stem(a["plotstem"], outfile, path)))
@@ -432,6 +442,19 @@ function output_path(fftfile, outputfilenm, outdir, nfiles)
 end
 
 """
+    spectrum_path(outfile, fftfile) -> String
+
+Resolve where one file's `--spectrum` output goes: beside the candidate file,
+replacing `.cohout` with `.spectrum` (or appending when `-o` gave another name),
+and beside the input FFT when the candidates go to stdout.
+"""
+function spectrum_path(outfile, fftfile)
+    isempty(outfile) && return string(first(splitext(fftfile)), ".spectrum")
+    return endswith(outfile, ".cohout") ?
+           string(outfile[1:end-7], ".spectrum") : string(outfile, ".spectrum")
+end
+
+"""
     search_one(ft, params, a, cache) -> Vector{Candidate}
 
 Search one FFT file with the parsed options `a`, reusing `cache`'s plans and
@@ -439,11 +462,13 @@ workspaces, and return its top `--ncands` candidates best-metric first.
 """
 function search_one(ft::FFTFile, params::SearchParams, a, cache::SearchCache,
                     backend::SearchBackend = CPUBackend();
-                    maxthreads::Integer = 0, outfile::Union{Nothing,AbstractString} = nothing)
+                    maxthreads::Integer = 0, outfile::Union{Nothing,AbstractString} = nothing,
+                    spectrumfile::Union{Nothing,AbstractString} = nothing)
     @info "Searching" file=ft.path T=ft.T nharms=params.nharms decimations=params.decimations threads=nthreads() backend=nameof(typeof(backend))
 
     progress = a["noprogress"] ? :none : (a["progressbar"] ? :bar : :text)
     mstats = a["metricstats"] ? MetricStats() : nothing
+    spec = a["spectrum"] ? Spectrum() : nothing
     # `--gpu` loads CUDA (and hence the extension's `_region!` method) from
     # inside `main`, so that method is NEWER than the running function's world
     # age and a direct call raises "method too new to be called from this world
@@ -454,12 +479,19 @@ function search_one(ft::FFTFile, params::SearchParams, a, cache::SearchCache,
                    blocksize = a["blocksize"], threshold = a["threshold"],
                    remove = !a["noremove"], dr_tol = a["drtol"],
                    harm_remove = !a["noharmremove"], numharm = a["numharm"],
-                   progress = progress, metricstats = mstats,
+                   progress = progress, metricstats = mstats, spectrum = spec,
                    normalize = a["normalize"], verbose = a["verbose"],
                    wisdom = !a["nowisdom"],
                    wisdom_file = isempty(a["wisdomfile"]) ? nothing : a["wisdomfile"],
                    cache = cache, backend = backend, maxthreads = maxthreads)
     cands = backend isa CPUBackend ? _dosearch() : Base.invokelatest(_dosearch)
+
+    if spec !== nothing
+        spectrumfile === nothing && throw(ArgumentError(
+            "--spectrum was requested but no output path was derived; pass --outdir or -o"))
+        write_spectrum(spec, spectrumfile, ft, params;
+                       threshold = a["threshold"], normalize = a["normalize"])
+    end
 
     if mstats !== nothing
         # Per-file stem, so a multi-file run does not overwrite one file's tables
