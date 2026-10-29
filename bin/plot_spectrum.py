@@ -79,23 +79,29 @@ def read_header(path):
 
 
 def decimate(y, max_points):
-    """Block-max decimation: ``(indices, values)`` keeping each block's peak."""
+    """Block min/max decimation: ``(indices, block_min, block_max, reduced)``.
+
+    One pixel covers ``step`` trials, so drawing only the block maximum would
+    plot the envelope of a few hundred draws and lift the noise floor by its
+    extreme-value offset.  Both ends are returned and drawn as a band: the
+    lower edge is the real floor, the upper edge keeps narrow peaks visible.
+    """
     n = len(y)
     if max_points <= 0 or n <= max_points:
-        return np.arange(n), y
+        return np.arange(n), y, y, False
     step = int(np.ceil(n / max_points))
     m = n // step
     if m < 2:
-        return np.arange(n), y
-    # Every block contributes its strongest value: an envelope, not a sample.
+        return np.arange(n), y, y, False
+    blk = y[:m * step].reshape(m, step)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)   # all-NaN blocks
-        yr = np.nanmax(y[:m * step].reshape(m, step), axis=1)
-    return np.arange(m) * step, yr
+        return (np.arange(m) * step, np.nanmin(blk, axis=1),
+                np.nanmax(blk, axis=1), True)
 
 
-def iter_rungs(path, rungs, power=True, max_points=300000):
-    """Yield ``(k, Hk, n, n_scored, x, y)`` one rung at a time.
+def iter_rungs(path, rungs, power=True, max_points=300000, xlim=None):
+    """Yield ``(k, Hk, n, n_scored, x, ylo, yhi, reduced)`` one rung at a time.
 
     Only the decimated arrays are kept, so a default-band file (tens of
     millions of trials per rung) plots without the payload ever existing in
@@ -119,13 +125,24 @@ def iter_rungs(path, rungs, power=True, max_points=300000):
         bad = np.isnan(z)
         n_scored = n - int(np.count_nonzero(bad)) if bad.any() else n
         z = z[:n_scored]                     # NaN is always a contiguous tail
+        if xlim is not None:
+            # Slice before decimating: a zoom should show every trial in the
+            # window, not one pixel of the full-band block reduction.
+            lo = max(0, int(np.floor((xlim[0] - f0) / df)))
+            hi = min(len(z), int(np.ceil((xlim[1] - f0) / df)) + 1)
+            if hi <= lo:
+                yield k, Hk, n, n_scored, np.empty(0), np.empty(0), np.empty(0), False
+                continue
+            z = z[lo:hi]
+            f0 = f0 + lo * df
         y = z
         if power:                            # P = 1 + z^2/2, in place
             y **= 2
             y *= np.float32(0.5)
             y += np.float32(1.0)
-        idx, yd = decimate(y, max_points)
-        yield k, Hk, n, n_scored, f0 + idx * df, yd.astype(np.float64)
+        idx, ylo, yhi, reduced = decimate(y, max_points)
+        yield (k, Hk, n, n_scored, f0 + idx * df,
+               ylo.astype(np.float64), yhi.astype(np.float64), reduced)
 
 
 def main(argv=None):
@@ -178,19 +195,24 @@ def main(argv=None):
                             ha="left", va="bottom", fontsize=7, color="0.35",
                             bbox=dict(fc="white", ec="none", alpha=0.75, pad=0.6))
 
-    rungs_iter = lambda: iter_rungs(args.spectrum, rungs, power, args.max_points)
+    rungs_iter = lambda: iter_rungs(args.spectrum, rungs, power, args.max_points,
+                                    args.xlim)
     total = scored = 0
 
     if args.stack:
         fig, axes = plt.subplots(len(rungs), 1, sharex=True, sharey=True,
                                  figsize=(12, 1.9 * len(rungs) + 1.2), squeeze=False)
         axes = axes[:, 0]
-        for i, (k, Hk, n, nv, x, y) in enumerate(rungs_iter()):
+        for i, (k, Hk, n, nv, x, ylo, yhi, reduced) in enumerate(rungs_iter()):
             total += n
             scored += nv
             ax = axes[i]
             if len(x):
-                ax.plot(x, y, lw=0.5, color="C0")
+                if reduced:
+                    ax.fill_between(x, ylo, yhi, lw=0, color="C0", alpha=0.55)
+                    ax.plot(x, yhi, lw=0.25, color="C0")
+                else:
+                    ax.plot(x, yhi, lw=0.5, color="C0")
             else:
                 ax.text(0.5, 0.5, "no trials below Nyquist at this depth",
                         transform=ax.transAxes, ha="center", va="center",
@@ -203,13 +225,18 @@ def main(argv=None):
         ax0 = axes[0]
     else:
         fig, ax = plt.subplots(figsize=(12, 5.0))
-        for i, (k, Hk, n, nv, x, y) in enumerate(rungs_iter()):
+        for i, (k, Hk, n, nv, x, ylo, yhi, reduced) in enumerate(rungs_iter()):
             total += n
             scored += nv
             if not len(x):
                 continue
-            ax.plot(x, y, lw=0.55, alpha=0.85, color="C%d" % (i % 10),
-                    label="k=%d  (H=%d, %d bins)" % (k, Hk, 2 * Hk))
+            col = "C%d" % (i % 10)
+            lab = "k=%d  (H=%d, %d bins)" % (k, Hk, 2 * Hk)
+            if reduced:
+                ax.fill_between(x, ylo, yhi, lw=0, alpha=0.45, color=col, label=lab)
+                ax.plot(x, yhi, lw=0.25, color=col)
+            else:
+                ax.plot(x, yhi, lw=0.55, alpha=0.85, color=col, label=lab)
         guides(ax)
         ax.legend(fontsize=8, ncol=3, loc="upper right", framealpha=0.9)
         ax.set_xlabel("searched frequency (Hz)")
