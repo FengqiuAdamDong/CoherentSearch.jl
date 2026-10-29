@@ -548,8 +548,9 @@ function _spectrum_header(s::Spectrum, ft::FFTFile, params::SearchParams;
                            k, Hk, 2Hk, join(ladder_boxcar_widths(2Hk, k, params), ","),
                            k * s.r_lo / ft.T, k * s.lodr / ft.T, s.total, off)
     end
-    println(io, "# NaN = trial not scored for that rung (k*f at or past Nyquist); the k=1 section")
-    println(io, "# is complete.  Values below threshold-gatemargin may be the Float32 gate")
+    println(io, "# NaN = trial not scored for that rung (its fundamental at or past Nyquist).")
+    println(io, "# Every section is exactly `total` long; values below threshold-gatemargin")
+    println(io, "# may be the Float32 gate")
     println(io, "# estimate (relative error < 1e-6); --normalize does not change these values.")
     println(io, "# end")
     txt = String(take!(io))
@@ -2226,6 +2227,14 @@ function _search_region!(ft::FFTFile, params::SearchParams,
                 i0 = cstarts[c]
                 n = (c < nchunks ? cstarts[c + 1] : Int(total)) - i0
                 rstart = r_lo + i0 * lodr
+                # The base pass still evaluates trials whose fundamental is at or
+                # past Nyquist: every harmonic row is zero-filled there and the
+                # metric is identically 0.  Record those as unscored (NaN), the
+                # same rule `decim_pass!` applies, so "NaN = not scored" holds
+                # for the k=1 section too.  `nspec` counts trials with
+                # `rstart + (j-1)*lodr < ft.N/2`.
+                nspec = vspec1 === nothing ? 0 :
+                        clamp(ceil(Int, (ft.N / 2 - rstart) / lodr), 0, n)
                 fill_chunk_profiles!(ws, dplans, ft, params, rstart, lodr, n; t0=i0)
                 rmean = rstart + (n - 1) * lodr / 2
                 # one robust σ per block
@@ -2246,7 +2255,7 @@ function _search_region!(ft::FFTFile, params::SearchParams,
                     hists[1][_window_index(wedges[1], rmean / ft.T)] : nothing
                 @phase 5 for j in 1:n
                     metric = ws.bcbatch.mvals[j]
-                    _spectrum_put!(vspec1, i0 + j, metric)
+                    j <= nspec && _spectrum_put!(vspec1, i0 + j, metric)
                     if collect_stats
                         mbuf[j] = metric
                         _hist_push!(basehist, metric)

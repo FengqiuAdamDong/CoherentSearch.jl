@@ -67,6 +67,28 @@ end
     @test all(k -> all(isfinite, s.vals[k]), 1:5)
 end
 
+@testset "spectrum: k=1 is NaN at and past Nyquist" begin
+    # The base pass evaluates every trial in the band, but above Nyquist every
+    # harmonic row is zero-filled and the metric is identically 0.  Those trials
+    # must be NaN, not a floor of zeros, in the k=1 section too.
+    ft = FFTFile(DISK_RED)
+    p = SearchParams(nharms = 60, decimations = collect(1:6), m = 16)
+    s = Spectrum()
+    with_logger(NullLogger()) do
+        search(ft, p; lofreq = 40.0, hifreq = 50.0, threshold = 8.0,
+               remove = false, harm_remove = false, spectrum = s,
+               wisdom = false, progress = :none)
+    end
+    @test s.r_lo < ft.N / 2 <= s.r_lo + (s.total - 1) * s.lodr
+    valid1 = count(g -> s.r_lo + g * s.lodr < ft.N / 2, 0:(s.total - 1))
+    @test 0 < valid1 < s.total
+    @test count(isnan, s.vals[1]) == s.total - valid1
+    @test all(isfinite, s.vals[1][1:valid1])
+    @test isnan(s.vals[1][valid1 + 1])          # the prefix is contiguous
+    # 40-50 Hz fundamentals leave every deep rung entirely past its own Nyquist.
+    @test all(k -> all(isnan, s.vals[k]), 2:6)
+end
+
 @testset "spectrum: chunk invariance" begin
     # The per-rung scored set must not depend on the chunking, NaN pattern
     # included (a chunk boundary must not drop or duplicate a trial).

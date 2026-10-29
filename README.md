@@ -561,8 +561,9 @@ the same quantity as the `.cohout` `'S/N'` column. The arrays are deliberately
 **not** aggregated across rungs: every `(phase, width)` score is `N(0,1)` in
 white noise, but the max over `2*nbins*widths` samples gives each rung its own
 false-alarm floor (measured at FAP=1e-4: 5.13 at `k=1`, 4.86 at `k=6`), so a max
-across sections would mix statistics. Rungs that stop at Nyquist leave the rest
-of their array `NaN`; the `k=1` section is always complete. With `--normalize`
+across sections would mix statistics. Any trial whose fundamental is at or past
+Nyquist is not scored — every harmonic row is zero-filled there — so it is
+`NaN`, in every section including `k=1`. With `--normalize`
 the file keeps the raw metric (one scale per rung) while `.cohout` reports the
 normalised `z`.
 
