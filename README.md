@@ -584,6 +584,13 @@ The cost is `4 bytes × rungs × trials` held in RAM while the search runs:
 observations (a warning fires above 1 GiB). `--spectrum` is CPU only; `--gpu`
 rejects it rather than silently omitting the file.
 
+Plot it with `python3 bin/plot_spectrum.py FILE.spectrum` (needs numpy and
+matplotlib; the search itself does not). The rungs share one frequency axis and
+one power scale, `P = 1 + z²/2`, with guides at S/N 5, 8, 10 and 12 from the same
+conversion; `--stack` gives one panel per rung, `--snr` plots `z` itself,
+`--log` makes the power axis logarithmic, and `--xlim` zooms. Large spectra are
+block-max decimated for display (`--max-points`), so narrow peaks survive.
+
 ### Candidate profile plots
 
 With `--plot`, the CLI reconstructs and plots the pulse profile of every
