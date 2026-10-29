@@ -78,10 +78,32 @@ def read_header(path):
     return meta, rungs
 
 
-def load_rungs(path, rungs):
-    """Return [(k, Hk, f0, df, z), ...] with the payload read by offset."""
+def decimate(y, max_points):
+    """Block-max decimation: ``(indices, values)`` keeping each block's peak."""
+    n = len(y)
+    if max_points <= 0 or n <= max_points:
+        return np.arange(n), y
+    step = int(np.ceil(n / max_points))
+    m = n // step
+    if m < 2:
+        return np.arange(n), y
+    # Every block contributes its strongest value: an envelope, not a sample.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)   # all-NaN blocks
+        yr = np.nanmax(y[:m * step].reshape(m, step), axis=1)
+    return np.arange(m) * step, yr
+
+
+def iter_rungs(path, rungs, power=True, max_points=300000):
+    """Yield ``(k, Hk, n, n_scored, x, y)`` one rung at a time.
+
+    Only the decimated arrays are kept, so a default-band file (tens of
+    millions of trials per rung) plots without the payload ever existing in
+    float64: it is read as Float32 and converted after decimation.  ``x`` is
+    the searched frequency of each plotted point, ``y`` the statistic (power
+    ``1 + z^2/2`` or ``z`` itself).
+    """
     size = os.path.getsize(path)
-    out = []
     for rung in rungs:
         k = int(rung["k"])
         Hk = int(rung["Hk"])
@@ -93,25 +115,17 @@ def load_rungs(path, rungs):
         if off < HEADER_BYTES or have < n:
             sys.exit("truncated %s: rung k=%d wants %d values at byte %d, file has %d"
                      % (path, k, n, off, have))
-        z = np.fromfile(path, dtype="<f4", count=n, offset=off).astype(np.float64)
-        out.append((k, Hk, f0, df, z))
-    return out
-
-
-def decimate(x, y, max_points):
-    """Block-max decimation, so narrow peaks survive a plot of a huge spectrum."""
-    n = len(x)
-    if max_points <= 0 or n <= max_points:
-        return x, y
-    step = int(np.ceil(n / max_points))
-    m = n // step
-    if m < 2:
-        return x, y
-    # Every block contributes its strongest value: an envelope, not a sample.
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)   # all-NaN blocks
-        yr = np.nanmax(y[:m * step].reshape(m, step), axis=1)
-    return x[::step][:m], yr
+        z = np.fromfile(path, dtype="<f4", count=n, offset=off)
+        bad = np.isnan(z)
+        n_scored = n - int(np.count_nonzero(bad)) if bad.any() else n
+        z = z[:n_scored]                     # NaN is always a contiguous tail
+        y = z
+        if power:                            # P = 1 + z^2/2, in place
+            y **= 2
+            y *= np.float32(0.5)
+            y += np.float32(1.0)
+        idx, yd = decimate(y, max_points)
+        yield k, Hk, n, n_scored, f0 + idx * df, yd.astype(np.float64)
 
 
 def main(argv=None):
@@ -138,7 +152,6 @@ def main(argv=None):
         ap.error("--log is a power-axis option; drop it (or --snr)")
 
     meta, rungs = read_header(args.spectrum)
-    data = load_rungs(args.spectrum, rungs)
 
     import matplotlib
     if not args.show:
@@ -150,9 +163,6 @@ def main(argv=None):
     lo = meta.get("lofreq", "?")
     hi = meta.get("hifreq", "?")
     tsec = meta.get("T", "?")
-
-    def yvals(z):
-        return 1.0 + 0.5 * z * z if power else z
 
     def ylabel():
         return "whitened power  P = 1 + z$^2$/2" if power else "peak boxcar S/N  z"
@@ -168,17 +178,23 @@ def main(argv=None):
                             ha="left", va="bottom", fontsize=7, color="0.35",
                             bbox=dict(fc="white", ec="none", alpha=0.75, pad=0.6))
 
+    rungs_iter = lambda: iter_rungs(args.spectrum, rungs, power, args.max_points)
+    total = scored = 0
+
     if args.stack:
-        fig, axes = plt.subplots(len(data), 1, sharex=True, sharey=True,
-                                 figsize=(12, 1.9 * len(data) + 1.2), squeeze=False)
+        fig, axes = plt.subplots(len(rungs), 1, sharex=True, sharey=True,
+                                 figsize=(12, 1.9 * len(rungs) + 1.2), squeeze=False)
         axes = axes[:, 0]
-        for i, (ax, (k, Hk, f0, df, z)) in enumerate(zip(axes, data)):
-            f = f0 + np.arange(len(z)) * df
-            y = yvals(z)
-            ok = ~np.isnan(y)
-            if ok.any():
-                xr, yr = decimate(f[ok], y[ok], args.max_points)
-                ax.plot(xr, yr, lw=0.5, color="C0")
+        for i, (k, Hk, n, nv, x, y) in enumerate(rungs_iter()):
+            total += n
+            scored += nv
+            ax = axes[i]
+            if len(x):
+                ax.plot(x, y, lw=0.5, color="C0")
+            else:
+                ax.text(0.5, 0.5, "no trials below Nyquist at this depth",
+                        transform=ax.transAxes, ha="center", va="center",
+                        fontsize=8, color="0.5")
             guides(ax, annotate=(i == 0))     # shared y: label the top panel only
             ax.set_ylabel("k=%d\nH=%d" % (k, Hk), fontsize=8)
             ax.margins(x=0.01)
@@ -187,15 +203,13 @@ def main(argv=None):
         ax0 = axes[0]
     else:
         fig, ax = plt.subplots(figsize=(12, 5.0))
-        for i, (k, Hk, f0, df, z) in enumerate(data):
-            f = f0 + np.arange(len(z)) * df
-            y = yvals(z)
-            ok = ~np.isnan(y)
-            if not ok.any():
+        for i, (k, Hk, n, nv, x, y) in enumerate(rungs_iter()):
+            total += n
+            scored += nv
+            if not len(x):
                 continue
-            xr, yr = decimate(f[ok], y[ok], args.max_points)
-            ax.plot(xr, yr, lw=0.55, alpha=0.85, color="C%d" % (i % 10),
-                    label="k=%d  (H=%d, %d bins)" % (k, Hk, int(2 * Hk)))
+            ax.plot(x, y, lw=0.55, alpha=0.85, color="C%d" % (i % 10),
+                    label="k=%d  (H=%d, %d bins)" % (k, Hk, 2 * Hk))
         guides(ax)
         ax.legend(fontsize=8, ncol=3, loc="upper right", framealpha=0.9)
         ax.set_xlabel("searched frequency (Hz)")
@@ -211,15 +225,13 @@ def main(argv=None):
         ax0.set_xlim(*args.xlim)
     title = args.title or ("%s  --  %.4g-%.4g Hz, nharms=%s, T=%s s, %d rung%s"
                            % (os.path.basename(args.spectrum), float(lo), float(hi),
-                              nharms, tsec, len(data), "" if len(data) == 1 else "s"))
+                              nharms, tsec, len(rungs), "" if len(rungs) == 1 else "s"))
     fig.suptitle(title, fontsize=10)
     fig.tight_layout()
 
     out = args.out or (os.path.splitext(args.spectrum)[0] + ".png")
     fig.savefig(out, dpi=args.dpi)
-    trials = sum(len(z) for *_, z in data)
-    scored = sum(int(np.count_nonzero(~np.isnan(z))) for *_, z in data)
-    print("wrote %s (%d rungs, %d trials, %d scored)" % (out, len(data), trials, scored))
+    print("wrote %s (%d rungs, %d trials, %d scored)" % (out, len(rungs), total, scored))
     if args.show:
         plt.show()
     return 0
