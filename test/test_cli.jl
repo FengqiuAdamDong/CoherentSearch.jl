@@ -299,3 +299,29 @@ end
         @test_throws ArgumentError main(vcat(base, ["--gpu", "--spectrum"]))
     end
 end
+
+@testset "prep_observation.sh: syntax, help, and dry-run" begin
+    script = joinpath(@__DIR__, "..", "bin", "prep_observation.sh")
+    @test isfile(script)
+    @test success(`bash -n $script`)
+    @test success(pipeline(`bash $script --help`, stdout=devnull, stderr=devnull))
+
+    # A dry run must plan every step and write nothing.  The tools are stubbed
+    # so this needs no PRESTO installation.
+    mktempdir() do dir
+        raw = joinpath(dir, "OBS.fil")
+        write(raw, "not really a filterbank; --dry-run never reads it\n")
+        out = joinpath(dir, "out")
+        cmd = `bash $script --dry-run --no-bary --dm 30 --ncpus 1 -o $out $raw`
+        for (var, val) in ("RFIFIND" => "/bin/true", "PREPSUBBAND" => "/bin/true",
+                           "REALFFT" => "/bin/true", "REDNOISE" => "/bin/true",
+                           "ZAPBIRDS" => "/bin/true")
+            cmd = addenv(cmd, var => val)
+        end
+        txt = read(cmd, String)
+        @test occursin("rfifind", txt)
+        @test occursin("prepsubband", txt)
+        @test occursin("realfft", txt)
+        @test !ispath(out)
+    end
+end

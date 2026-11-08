@@ -1287,6 +1287,14 @@ julia --project=. -t auto bin/coherent_search.jl OBS.dat \
   sift/combine tooling works unchanged.
 * `--rednoise-startwidth` / `--rednoise-endwidth` / `--rednoise-endfreq` pass
   PRESTO's rednoise knobs (defaults 6 / 100 / 6.0).
+* **Dereddening is unconditional and in RAM, and there is no "already
+  dereddened?" check.** Every grid point runs `presto_fft_amps` then
+  `presto_deredden!`; no `.fft` is ever written, so there is nothing to inspect
+  or reuse, and a rerun redoes it. For an on-disk FFT the search never runs
+  rednoise at all: `FFTFile` sets `dereddened` from the *filename*
+  (`occursin("_red.fft", path)`, `src/fileio.jl`), so a misnamed file cannot be
+  detected. Use `bin/prep_observation.sh` for the on-disk chain; it skips a
+  step whose outputs exist and records the zaplist hash before zapping.
 * **`--demod-concurrency N` searches N grid points at once** (0 = one slot per
   Julia thread, 1 = the purely sequential driver).  Each concurrent search is
   pinned to `nthreads()/N` threads.  This is the faster choice: a demodulation is

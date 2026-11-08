@@ -85,6 +85,7 @@ ext/
   CoherentSearchCUDAExt.jl  the GPU search (a weak dependency on CUDA.jl)
 bin/
   coherent_search.jl  command-line entry point (a shim onto src/cli.jl)
+  prep_observation.sh rfifind -> prepsubband -> realfft (+ rednoise/zap)
   toy_coherent_search.jl  the same search with every optimisation removed
   parallel_search.py  fill a machine: partition a file list over cores or GPUs
   plotting.jl         CairoMakie candidate-profile plotting (loaded on demand)
@@ -331,6 +332,46 @@ cands = search(ft, params; lofreq=0.1, hifreq=125, threshold=8)
 
 Each candidate reports its barycentric spin frequency, period (`1/f`), the S/N
 metric, and the number of harmonics summed in the detection.
+
+### Preparing raw data: `bin/prep_observation.sh`
+
+The search reads a PRESTO `.fft`. `bin/prep_observation.sh` builds one from raw
+filterbank/PSR FITS/subband data, on disk, so the FFT can be inspected and its
+Fourier bins masked before searching:
+
+```sh
+# rfifind -> prepsubband (barycentered) -> realfft, one .fft per DM
+bin/prep_observation.sh -o prep/ OBS.fil --dm 238.60,445.0 --ncpus 8
+
+# inspect the raw FFT, then build and zap the dereddened one
+explorefft prep/OBS_DM238.60.fft
+bin/prep_observation.sh -o prep/ OBS.fil --dm 238.60 --zapfile zaplist.txt
+
+# search the masked, normalized FFT
+julia --project=. -t auto bin/coherent_search.jl prep/OBS_DM238.60_red.fft
+```
+
+`--dm` accepts a comma/space-separated list; the script runs `prepsubband` once
+per DM so each one resumes independently. `--no-bary` skips barycentering
+(useful for simulations or a host without TEMPO/tempo2), `--mask FILE` applies
+an existing rfifind mask and skips rfifind, and `--rfifind-args` /
+`--prepsubband-args` forward anything else. Every step is skipped when its
+outputs already exist (including the zap, when the recorded zaplist hash still
+matches); `--force` rebuilds, and `--dry-run` prints the commands and the reuse
+decisions without writing.
+
+**Zap the `_red.fft`, after `rednoise`, never the raw `.fft`.** `rednoise`
+normalizes each bin by a running median of the raw spectrum, so zapping first
+would make it normalize against holes and rescale the surrounding bins. On the
+dereddened file, `zapbirds -zap` (PRESTO ≥ 6) replaces the zapped bins with
+noise, which preserves the unit-mean power the search's analytic noise scale
+assumes; do not pass `-constamp`. The raw `.fft` is never modified, so
+`_red.fft` is always reproducible from it, and a changed zaplist regenerates it
+before re-zapping. If you zero bins by hand instead, pass `--sigma measured`
+to the search.
+
+This is the on-disk counterpart to `--demod-grid`, which FFTs and dereddens in
+RAM and writes no `.fft`; see `demod/README.md` §11.
 
 ### Searching many files at once (and start-up cost)
 
