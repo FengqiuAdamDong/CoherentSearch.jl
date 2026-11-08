@@ -110,8 +110,6 @@ set -euo pipefail
 : "${P_BREAK:=}"                      # hybrid: manual switch period [yr]; empty = auto
 : "${BREAK_COV:=}"                    # hybrid: auto-switch ajs coverage [%]; empty = 60
 : "${PLOT:=}"                         # non-empty = write per-orbit phase plots
-: "${TERMS:=}"                        # ajs: subset of accel jerk snap; empty = all
-: "${CIRC_STRICT:=}"                  # circular/hybrid: non-empty = bound raw max|R|
 
 # Tool locations.
 : "${COH_REPO:=/home/fadong/Documents/CoherentSearch.jl}"
@@ -167,7 +165,6 @@ else
         [ -n "$PO" ]   && GRID_ARGS+=(-p_o $PO)
         [ -n "$SINI" ] && GRID_ARGS+=(-sin_i $SINI)
         GRID_ARGS+=(-phase_tol_cycles "$PHASE_TOL")
-        [ -n "$CIRC_STRICT" ] && GRID_ARGS+=(-circ_strict)
     elif [ "$MODE" = "hybrid" ]; then
         # Hybrid: the ajs scan still needs e/omega_peri/n_phase/nsamp (it is
         # what measures coverage and grids the long-period side); the circular
@@ -183,8 +180,6 @@ else
         [ -n "$MAX_SNAP" ]   && GRID_ARGS+=(-max_snap "$MAX_SNAP")
         [ -n "$P_BREAK" ]    && GRID_ARGS+=(-p_break "$P_BREAK")
         [ -n "$BREAK_COV" ]  && GRID_ARGS+=(-break_coverage "$BREAK_COV")
-        [ -n "$TERMS" ]      && GRID_ARGS+=(-terms $TERMS)
-        [ -n "$CIRC_STRICT" ] && GRID_ARGS+=(-circ_strict)
         [ -n "$PLOT" ]       && GRID_ARGS+=(-plot)
     else
         GRID_ARGS+=(-phase_tol_cycles "$PHASE_TOL" -n_phase "$NPHASE" -nsamp "$NSAMP")
@@ -195,7 +190,6 @@ else
         [ -n "$MAX_ACCEL" ]  && GRID_ARGS+=(-max_accel "$MAX_ACCEL")
         [ -n "$MAX_JERK" ]   && GRID_ARGS+=(-max_jerk "$MAX_JERK")
         [ -n "$MAX_SNAP" ]   && GRID_ARGS+=(-max_snap "$MAX_SNAP")
-        [ -n "$TERMS" ]      && GRID_ARGS+=(-terms $TERMS)
         [ -n "$PLOT" ]       && GRID_ARGS+=(-plot)
     fi
 

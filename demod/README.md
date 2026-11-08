@@ -986,7 +986,7 @@ its YAML skipped), then writes the combined YAML itself.
 | `run_demod_search.sh` | End-to-end: inject → derive grid → nearest grid point → demod → search. |
 | `test_circular_demod.sh` | Same, for circular mode, with assertions on recovery. *Untracked (local only).* |
 | `run_nsns_sweep.sh` | Full sweep: derive grid → demodulate **every** point → FFT → search all; CPU-parallel or one GPU invocation.  `GRID_ONLY=1` prints the grid paths/count and exits. |
-| `slurm_demod_sweep.sh` | Submit the in-memory driver as a SLURM job array: one array element per `BATCH_SIZE`-row batch.  Derives/selects a hybrid (default), circular, or ajs/Taylor grid; writes `batch_plan.tsv`/`slurm_job.env`; submits a dependent combine job. |
+| `slurm_demod_sweep.sh` | Submit the in-memory driver as a SLURM job array: one array element per `BATCH_SIZE`-row batch.  Derives/selects a hybrid grid, writes `slurm_job.env`, and submits a dependent combine job. |
 | `slurm_demod_batch.sh` | One array element: sources `slurm_job.env` and runs one `--demod-batch-index` batch in one Julia process. |
 | `slurm_demod_combine.sh` | Dependent post-array job: combines every batch's `.cohout` with `combine_cohout.py`. |
 | `combine_cohout.py` | Merge all per-point `.cohout` into one candidate list (optional plot + truth crosshair). |
@@ -1047,75 +1047,56 @@ unit a SLURM array element should run:
 
 ```sh
 julia --project=. -t "$SLURM_CPUS_PER_TASK" bin/coherent_search.jl OBS.dat \
-    --demod-grid circ.csv --demod-grid taylor.csv \
+    --demod-grid circ.csv --demod-grid ajs.csv \
     --demod-batch-size 64 --demod-batch-index "$((SLURM_ARRAY_TASK_ID+1))" \
     --demod-batch-total 12345 --outdir OUT --threshold 6 --noprogress
 ```
 
-`--demod-batch-size B --demod-batch-index I` selects global rows
-`(I-1)B+1 .. min(IB, N)` of the flattened `--demod-grid` list; batches are
-disjoint and cover the grid exactly once.  `--demod-batch-total N` is the
-submitter's count: it clamps the last batch and errors if the grid no longer
-matches the plan.  The point list is streamed, so only the batch is in memory
-(this matters at `10^8`-row grids, where holding every trial would be tens of
-GB).
+`--demod-batch-size B --demod-batch-index I --demod-batch-total N` selects
+global rows `(I-1)B+1 .. min(IB, N)` of the flattened `--demod-grid` list.  The
+total clamps the last batch and makes a grid that changed after submission an
+error; the point list is streamed, so only the batch is in memory.
 
 Do not use `-t auto` under SLURM: it sees the node's CPUs, not the cgroup
 allocation.  Pass `julia -t "$SLURM_CPUS_PER_TASK"`, and leave
 `--demod-concurrency 0` so the driver puts one single-threaded search in each
 slot (the measured optimum).
 
-`demod/slurm_demod_sweep.sh` wraps the whole thing:
+`demod/slurm_demod_sweep.sh` derives one **hybrid** grid (circular below
+`p_break`, ajs/Taylor above it), splits it into `BATCH_SIZE`-row batches, submits
+one array element per batch, and submits a dependent combine job:
 
 ```sh
-# derive a hybrid grid (circular below p_break, ajs above), 64 rows per element
-INF=/path/OBS.inf MODE=hybrid BATCH_SIZE=64 CPUS_PER_TASK=16 \
+INF=/path/OBS.inf BATCH_SIZE=64 CPUS_PER_TASK=16 \
+    PARTITION=... MEM=32G TIME=12:00:00 OUTDIR=/path/OUT \
     bash demod/slurm_demod_sweep.sh
 
-# inspect the plan without submitting
-DRY_RUN=1 INF=/path/OBS.inf MODE=hybrid BATCH_SIZE=64 \
-    bash demod/slurm_demod_sweep.sh
-
-# re-run only failed batches 3 and 7, reusing the saved plan
-RESTART=1 RERUN_BATCHES="3 7" OUTDIR=/path/OUT \
-    bash demod/slurm_demod_sweep.sh
+# Print the sbatch command and the batch count without submitting.
+DRY_RUN=1 INF=/path/OBS.inf BATCH_SIZE=64 \
+    OUTDIR=/path/OUT bash demod/slurm_demod_sweep.sh
 ```
 
-`MODE` is `hybrid` (default; one derivation, circular below `p_break` and ajs
-at/above it), `circular`, or `ajs` (alias `taylor`).  `hybrid` passes the
-CSV(s) it emitted (normally both) to every task; the row's model travels with
-it, so a batch may contain both sides of the split (or only one, if one side
-is empty).  `GRID_CSV_LIST=/path/circ.csv:/path/ajs.csv` skips derivation.
+`GRID_CSV_LIST=/path/circ.csv:/path/ajs.csv` skips derivation and uses the CSVs
+you already have.  `P_BREAK` and `BREAK_COV` control the hybrid split; the other
+grid knobs (`P0`, `PHASE_TOL`, `PO`, `ECC`, `SINI`, `OMEGA_PERI`, `DROPPCT`,
+`NPHASE`, `NSAMP`) are forwarded to `run_nsns_sweep.sh`.  `SEARCH_ARGS` is
+whitespace-split (e.g. `SEARCH_ARGS='--threshold 6'`), and
+`DEMOD_CONCURRENCY` controls how many points are searched at once.
 
-The submitter:
+Choose `BATCH_SIZE` large enough to amortise Julia start-up, grid parsing and
+FFTW planning, but small enough that a batch fits `TIME`; 32-128 is a good
+starting range.  Memory is set by `DEMOD_CONCURRENCY`, not `BATCH_SIZE`: each
+live slot holds the remap (~8 bytes per input sample) plus amplitudes
+(~4 bytes/sample), so set `MEM` and `DEMOD_CONCURRENCY` together.  The submitter
+errors if `ceil(N/BATCH_SIZE)` exceeds `MAX_ARRAY_TASKS` (default 1000), and
+tells you the minimum feasible batch size.
 
-1. derives/selects the grid(s) via `run_nsns_sweep.sh GRID_ONLY=1` (one
-   definition of the grid, shared with the file-based sweep);
-2. writes `batch_plan.tsv` (`batch first last count`) and a sourceable
-   `slurm_job.env`;
-3. submits `--array=0..NBATCHES-1` (optionally `%MAX_CONCURRENT`), one worker
-   process per batch;
-4. submits a dependent combine job (`--dependency=afterok:<array job>`), unless
-   `COMBINE=0`.
+Logs are in `$OUTDIR/logs`; the combined list is `$OUTDIR/combined_cohout.txt`.
+To rerun one failed array element, reuse the saved config:
 
-Key knobs: `BATCH_SIZE` (grid rows per job), `MAX_ARRAY_TASKS` (default 1000;
-the submitter errors with the minimum feasible batch size if the array would be
-larger), `CPUS_PER_TASK` (Julia threads; use physical cores, not SMT), `MEM`,
-`TIME`, `PARTITION`, `ACCOUNT`, `QOS`, `EXTRA_SBATCH`, `MODULE_LOAD`,
-`SEARCH_ARGS` (whitespace-split; `-t` there is the search threshold, not
-threads), `DEMOD_CONCURRENCY`, `GPU=1` (one GPU per task, concurrency 1).
-
-Memory is set by `DEMOD_CONCURRENCY`, not `BATCH_SIZE`: each live slot holds the
-remap (~8 bytes per input sample) plus amplitudes (~4 bytes/sample).  On a
-`10^8`-sample observation that is a few GB per slot, so set `MEM` and
-`DEMOD_CONCURRENCY` together.  Choose `BATCH_SIZE` large enough that Julia
-start-up, grid parsing and FFTW planning are amortised, but small enough that a
-batch fits `TIME`; 32-128 is a reasonable starting range for a
-search-dominated run.
-
-Logs land in `$OUTDIR/logs` (one SLURM `.out`/`.err` per array element plus
-`batch_<N>.log`), the plan is `$OUTDIR/batch_plan.tsv`, and the combined list is
-`$OUTDIR/combined_cohout.txt`.
+```sh
+sbatch --array=2 ... "$COH_REPO/demod/slurm_demod_batch.sh" "$OUTDIR/slurm_job.env"
+```
 
 ### Folding the detected candidates
 
@@ -1329,11 +1310,11 @@ julia --project=. -t auto bin/coherent_search.jl OBS.dat \
     that alternative was measured at 1.06–1.13x (better scaling, but it re-reads
     the `.dat` and re-pays ~0.85 s/point of start-up) and it costs real file
     I/O.  See below.
-* **`--demod-batch-size B --demod-batch-index I`** processes only the I-th
-  contiguous block of B rows of the flattened grid (CSVs in `--demod-grid`
-  order).  This is the SLURM array unit; `--demod-batch-total N` is the
-  submitter's planned total and makes a changed grid an error rather than a
-  short run.  The block is streamed by `read_demod_grid_slice`, so the point
+* **`--demod-batch-size B --demod-batch-index I --demod-batch-total N`**
+  processes only the I-th contiguous block of B rows of the flattened grid
+  (CSVs in `--demod-grid` order).  `N` is required: it clamps the last batch and
+  makes a changed grid an error rather than a short run.  This is the SLURM
+  array unit; the block is streamed by `read_demod_grid_slice`, so the point
   list is O(B), not O(total).  See the "SLURM batch runs" subsection in §9.
 * The FFTW plan for each demodulated length uses the same switch as PRESTO's
   `fftwcall()`: `FFTW_ESTIMATE` above 16384 complex points and `FFTW_MEASURE`

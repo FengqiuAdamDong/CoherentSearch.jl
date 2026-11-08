@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 #
-# Combine every batch's .cohout files into one candidate list, after the job
-# array has finished.  Submitted by demod/slurm_demod_sweep.sh with
-# --dependency=afterok:<array_job_id>, so a failed batch blocks this job.
+# Combine every batch's .cohout files after the array has finished.
+# Submitted by demod/slurm_demod_sweep.sh with --dependency=afterok:<array>.
 #
 # Usage (normally via sbatch from the submitter):
 #   sbatch ... slurm_demod_combine.sh /path/to/slurm_job.env
@@ -17,25 +16,20 @@ if [ -n "${MODULE_LOAD:-}" ]; then eval "$MODULE_LOAD"; fi
 cd "$OUTDIR"
 
 # Count with find rather than a bash glob: a real sweep can have more .cohout
-# files than ARG_MAX, and the Python tool globs internally anyway.
+# files than ARG_MAX, and combine_cohout.py globs internally anyway.
 found=$(find "$OUTDIR" -maxdepth 1 -type f -name "${INBASE}_demod_*_red.cohout" | wc -l)
 echo ">> found $found .cohout file(s); expected $TOTAL_POINTS"
 if [ "$found" -ne "$TOTAL_POINTS" ]; then
     echo "WARNING: expected $TOTAL_POINTS candidate file(s), found $found." >&2
-    echo "WARNING: an array element may have failed, or OUTDIR contains files from another run." >&2
+    echo "WARNING: an array element may have failed, or OUTDIR has files from another run." >&2
 fi
 if [ "$found" -eq 0 ]; then
-    echo "ERROR: no '*_demod_*_red.cohout' files in $OUTDIR" >&2
+    echo "ERROR: no '${INBASE}_demod_*_red.cohout' files in $OUTDIR" >&2
     exit 1
-fi
-
-PLOT_ARGS=()
-if [ -n "${COMBINE_PLOT:-}" ]; then
-    PLOT_ARGS=(--plot "$COMBINE_PLOT")
 fi
 
 "$PYTHON" "$COH_REPO/demod/combine_cohout.py" \
     "$OUTDIR/${INBASE}_demod_*_red.cohout" \
-    -o "$OUTDIR/combined_cohout.txt" "${PLOT_ARGS[@]}"
+    -o "$OUTDIR/combined_cohout.txt"
 
 echo ">> wrote $OUTDIR/combined_cohout.txt"

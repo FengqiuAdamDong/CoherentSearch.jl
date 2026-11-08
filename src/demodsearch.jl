@@ -30,14 +30,14 @@ use on a real `.fft` file ([`search_one`](@ref) is reused verbatim, so
 identically).  One `<stem>_demod_<grid>_red.cohout` is written per point, into
 `--outdir` or beside the input.
 
-**Batches.**  `--demod-batch-size B --demod-batch-index I` runs only the I-th
-contiguous block of B rows of the flattened grid (CSVs in `--demod-grid` order),
-the unit a SLURM array element executes.  The block is streamed by
-[`read_demod_grid_slice`](@ref), so the point list is O(B), not O(total grid).
-That is what makes a `10^8`-row ajs grid runnable at all: unbatched, the driver
-would hold every literal row string at once.  `--demod-batch-total` is the total
-the submitter planned with; it clamps the last batch and turns a changed grid
-into an error rather than a silently short run.
+**Batches.**  `--demod-batch-size B --demod-batch-index I --demod-batch-total N`
+runs only the I-th contiguous block of B rows of the flattened grid (CSVs in
+`--demod-grid` order), the unit a SLURM array element executes.  The block is
+streamed by [`read_demod_grid_slice`](@ref), so the point list is O(B), not
+O(total grid).  That is what makes a `10^8`-row ajs grid runnable at all:
+unbatched, the driver would hold every literal row string at once.  `N` clamps
+the last batch and turns a changed grid into an error rather than a silently
+short run.
 
 **Sequential demodulation, concurrent searches.**  The search is the dominant
 cost (~1.7 s of a ~1.75 s in-process point at `--nharms 60`), and a demodulation
@@ -97,50 +97,7 @@ function demod_main(a)
     isempty(dats) && throw(ArgumentError(
         "--demod-grid needs the time series to demodulate: pass positional .dat paths or --filelist FILE"))
 
-    # Grid rows, flattened in --demod-grid order.  A batch is a contiguous
-    # block of this global sequence: one SLURM array element runs one block, and
-    # the streaming reader materializes only that block.  A 10^8-row ajs grid is
-    # a real case, so flattening everything first is not an option.
-    grid_paths = a["demod-grid"]::Vector{String}
-    bsize = a["demod-batch-size"]::Int
-    bidx = a["demod-batch-index"]::Int
-    btotal = a["demod-batch-total"]::Int
-    bsize < 0 && throw(ArgumentError("--demod-batch-size must be >= 0 (got $bsize)"))
-    btotal < 0 && throw(ArgumentError("--demod-batch-total must be >= 0 (got $btotal)"))
-    bidx < 1 && throw(ArgumentError("--demod-batch-index must be >= 1 (got $bidx)"))
-    if bsize == 0
-        bidx == 1 || throw(ArgumentError(
-            "--demod-batch-index $bidx requires --demod-batch-size > 0"))
-        btotal == 0 || throw(ArgumentError(
-            "--demod-batch-total requires --demod-batch-size > 0"))
-    end
-
-    points = Tuple{Symbol,Tuple{String,String,String}}[]
-    if bsize == 0
-        # The original whole-grid path: read every CSV and log each one's count.
-        for csv in grid_paths
-            mode, rows = read_demod_grid(csv)
-            @info "Demodulation grid" csv=csv mode=mode npoints=length(rows)
-            for row in rows
-                push!(points, (mode, row))
-            end
-        end
-    else
-        rng = demod_batch_range(btotal, bsize, bidx)
-        points = read_demod_grid_slice(grid_paths, first(rng), last(rng))
-        isempty(points) && throw(ArgumentError(
-            "batch $bidx of size $bsize selects no grid points " *
-            "(rows $(first(rng)):$(last(rng)); total=$btotal)"))
-        if btotal > 0 && length(points) != length(rng)
-            throw(ArgumentError(
-                "batch $bidx expected $(length(rng)) grid rows " *
-                "($(first(rng)):$(last(rng))) but the grid CSVs yielded " *
-                "$(length(points)); the grid no longer matches the submitted batch plan"))
-        end
-        @info "Demodulation batch" index=bidx of=(btotal > 0 ? cld(btotal, bsize) : 0) first=first(rng) last=last(rng) points=length(points) total=btotal
-    end
-    isempty(points) && throw(ArgumentError(
-        "no demodulation points in $(join(grid_paths, ", "))"))
+    points = _demod_grid_points(a, a["demod-grid"]::Vector{String})
 
     outdir = a["outdir"]
     isempty(outdir) && (outdir = dirname(abspath(dats[1])))
@@ -256,6 +213,49 @@ function demod_main(a)
         release_backend!(backend)
     end
     return nothing
+end
+
+"""
+    _demod_grid_points(a, grid_paths) -> Vector{Tuple{Symbol,NTuple{3,String}}}
+
+The grid rows this process should search: the whole grid when
+`--demod-batch-size` is 0, otherwise the contiguous batch selected by
+`--demod-batch-index` and `--demod-batch-total`.
+
+The batched path streams the CSVs and keeps only its own rows, so a job on a
+`10^8`-row grid does not hold every trial.  `--demod-batch-total` makes a grid
+that changed after submission an error instead of a silently short run.
+"""
+function _demod_grid_points(a, grid_paths)
+    bsize = a["demod-batch-size"]::Int
+    bidx = a["demod-batch-index"]::Int
+    btotal = a["demod-batch-total"]::Int
+
+    if bsize == 0
+        bidx == 1 || throw(ArgumentError(
+            "--demod-batch-index $bidx requires --demod-batch-size > 0"))
+        btotal == 0 || throw(ArgumentError(
+            "--demod-batch-total requires --demod-batch-size > 0"))
+        points = Tuple{Symbol,Tuple{String,String,String}}[]
+        for csv in grid_paths
+            mode, rows = read_demod_grid(csv)
+            @info "Demodulation grid" csv=csv mode=mode npoints=length(rows)
+            for row in rows
+                push!(points, (mode, row))
+            end
+        end
+        isempty(points) && throw(ArgumentError(
+            "no demodulation points in $(join(grid_paths, ", "))"))
+        return points
+    end
+
+    rng = demod_batch_range(btotal, bsize, bidx)
+    points = read_demod_grid_slice(grid_paths, first(rng), last(rng))
+    length(points) == length(rng) || throw(ArgumentError(
+        "batch $bidx expected $(length(rng)) grid rows ($(first(rng)):$(last(rng))) " *
+        "but the grid CSVs yielded $(length(points)); the grid no longer matches the plan"))
+    @info "Demodulation batch" index=bidx of=cld(btotal, bsize) first=first(rng) last=last(rng) points=length(points) total=btotal
+    return points
 end
 
 """

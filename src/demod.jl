@@ -1049,31 +1049,21 @@ end
 """
     demod_batch_range(total, size, index) -> UnitRange{Int}
 
-Global 1-based grid-row range for one batch.  `size == 0` means no batching and
-requires `index == 1`; `total <= 0` means the total is not known yet, so the
-range runs to `lo + size - 1` and the caller truncates at end of file.
+Global 1-based grid-row range for one batch.  `total` is the number of rows in
+the flattened grid, `size` the rows per batch, and `index` the 1-based batch
+number.  The last batch is truncated at `total`.
 
-This is the single definition of the batch partition used by both the CLI and
-the SLURM submitter's `batch_plan.tsv`, so the two cannot disagree about which
-rows a batch owns.
+This is the single definition of the batch partition: the driver uses it to
+select rows, and the submitter's array size is `ceil(total / size)`.
 """
 function demod_batch_range(total::Integer, size::Integer, index::Integer)
-    size < 0 && throw(ArgumentError("--demod-batch-size must be >= 0 (got $size)"))
-    total < 0 && throw(ArgumentError("--demod-batch-total must be >= 0 (got $total)"))
-    index < 1 && throw(ArgumentError("--demod-batch-index must be >= 1 (got $index)"))
-    if size == 0
-        index == 1 || throw(ArgumentError(
-            "--demod-batch-index $index requires --demod-batch-size > 0"))
-        total == 0 && return 1:0
-        return 1:total
-    end
+    size > 0 || throw(ArgumentError("--demod-batch-size must be > 0 (got $size)"))
+    total > 0 || throw(ArgumentError("--demod-batch-total must be > 0 (got $total)"))
+    index >= 1 || throw(ArgumentError("--demod-batch-index must be >= 1 (got $index)"))
     lo = (index - 1) * size + 1
-    if total > 0
-        lo > total && throw(ArgumentError(
-            "batch index $index of size $size starts at point $lo, past the total $total"))
-        return lo:min(lo + size - 1, total)
-    end
-    return lo:(lo + size - 1)
+    lo <= total || throw(ArgumentError(
+        "batch index $index of size $size starts at point $lo, past the total $total"))
+    return lo:min(lo + size - 1, total)
 end
 
 """
@@ -1082,11 +1072,11 @@ end
 Read only the globally indexed rows `first:last` of the flattened grid formed by
 `paths` in order.  Rows are counted exactly as `read_demod_grid` counts them
 (blank/whitespace-only lines skipped), and the mode of each CSV travels with its
-rows, so a hybrid/both sweep can mix models in one batch.
+rows, so a hybrid sweep can mix models in one batch.
 
 The CSVs are streamed, and the function stops as soon as `last` is passed: only
 the selected batch is ever materialized.  This is what lets a job on a
-178M-row grid run in O(batch) memory instead of holding every trial.
+`10^8`-row grid run in O(batch) memory instead of holding every trial.
 """
 function read_demod_grid_slice(paths, first::Integer, last::Integer)
     first >= 1 || throw(ArgumentError("first grid row must be >= 1 (got $first)"))

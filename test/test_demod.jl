@@ -329,17 +329,16 @@ end
 
 @testset "demod batch ranges and streaming slices" begin
     # The single definition of the batch partition: every row exactly once, the
-    # last batch short, and an unknown total running to the requested end.
+    # last batch short.
     @test CoherentSearch.demod_batch_range(10, 4, 1) == 1:4
     @test CoherentSearch.demod_batch_range(10, 4, 2) == 5:8
     @test CoherentSearch.demod_batch_range(10, 4, 3) == 9:10
     @test CoherentSearch.demod_batch_range(10, 20, 1) == 1:10
-    @test CoherentSearch.demod_batch_range(0, 0, 1) == 1:0
-    @test CoherentSearch.demod_batch_range(0, 4, 1) == 1:4
     @test_throws ArgumentError CoherentSearch.demod_batch_range(10, 4, 0)
     @test_throws ArgumentError CoherentSearch.demod_batch_range(10, 4, 4)
     @test_throws ArgumentError CoherentSearch.demod_batch_range(10, -1, 1)
-    @test_throws ArgumentError CoherentSearch.demod_batch_range(10, 0, 2)
+    @test_throws ArgumentError CoherentSearch.demod_batch_range(10, 0, 1)
+    @test_throws ArgumentError CoherentSearch.demod_batch_range(0, 4, 1)
 
     dir = mktempdir()
     circ = joinpath(dir, "circ.csv")

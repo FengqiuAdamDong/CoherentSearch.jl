@@ -146,12 +146,11 @@ output each). PRESTO's `realfft` and `rednoise` are reproduced in-process byte
 for byte (for the FFT sizes real demodulations use), so the search reads exactly
 the amplitudes the on-disk chain would have given it. See `demod/README.md` §11.
 
-For a SLURM cluster, `demod/slurm_demod_sweep.sh` splits the flattened grid into
-user-sized batches and submits one array element per batch — not one orbit per
-job. `BATCH_SIZE` is the number of grid rows per task; `MODE=hybrid` (the
-default) derives one grid that is circular below `p_break` and ajs/Taylor above
-it, while `MODE=circular|ajs` runs one model over the whole range. Each task runs
-the in-memory driver with `--demod-batch-size/--demod-batch-index`, so large
+For a SLURM cluster, `demod/slurm_demod_sweep.sh` derives one hybrid grid
+(circular below `p_break`, ajs/Taylor above), splits it into user-sized batches,
+and submits one array element per batch — not one orbit per job. `BATCH_SIZE` is
+the number of grid rows per task. Each task runs the in-memory driver with
+`--demod-batch-size/--demod-batch-index/--demod-batch-total`, so large
 (`10^8`-row) grids are streamed one batch at a time. A dependent job combines the
 per-point `.cohout` files. See `demod/README.md` §9 ("SLURM batch runs").
 
