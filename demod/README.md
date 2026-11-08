@@ -986,7 +986,7 @@ its YAML skipped), then writes the combined YAML itself.
 | `run_demod_search.sh` | End-to-end: inject → derive grid → nearest grid point → demod → search. |
 | `test_circular_demod.sh` | Same, for circular mode, with assertions on recovery. *Untracked (local only).* |
 | `run_nsns_sweep.sh` | Full sweep: derive grid → demodulate **every** point → FFT → search all; CPU-parallel or one GPU invocation.  `GRID_ONLY=1` prints the grid paths/count and exits. |
-| `slurm_demod_sweep.sh` | Submit the in-memory driver as a SLURM job array: one array element per `BATCH_SIZE`-row batch.  Derives/selects circular, ajs/Taylor, both, or hybrid grids; writes `batch_plan.tsv`/`slurm_job.env`; submits a dependent combine job. |
+| `slurm_demod_sweep.sh` | Submit the in-memory driver as a SLURM job array: one array element per `BATCH_SIZE`-row batch.  Derives/selects a hybrid (default), circular, or ajs/Taylor grid; writes `batch_plan.tsv`/`slurm_job.env`; submits a dependent combine job. |
 | `slurm_demod_batch.sh` | One array element: sources `slurm_job.env` and runs one `--demod-batch-index` batch in one Julia process. |
 | `slurm_demod_combine.sh` | Dependent post-array job: combines every batch's `.cohout` with `combine_cohout.py`. |
 | `combine_cohout.py` | Merge all per-point `.cohout` into one candidate list (optional plot + truth crosshair). |
@@ -1068,12 +1068,12 @@ slot (the measured optimum).
 `demod/slurm_demod_sweep.sh` wraps the whole thing:
 
 ```sh
-# derive both models, 64 grid rows per array element
-INF=/path/OBS.inf MODE=both BATCH_SIZE=64 CPUS_PER_TASK=16 \
+# derive a hybrid grid (circular below p_break, ajs above), 64 rows per element
+INF=/path/OBS.inf MODE=hybrid BATCH_SIZE=64 CPUS_PER_TASK=16 \
     bash demod/slurm_demod_sweep.sh
 
 # inspect the plan without submitting
-DRY_RUN=1 INF=/path/OBS.inf MODE=both BATCH_SIZE=64 \
+DRY_RUN=1 INF=/path/OBS.inf MODE=hybrid BATCH_SIZE=64 \
     bash demod/slurm_demod_sweep.sh
 
 # re-run only failed batches 3 and 7, reusing the saved plan
@@ -1081,10 +1081,11 @@ RESTART=1 RERUN_BATCHES="3 7" OUTDIR=/path/OUT \
     bash demod/slurm_demod_sweep.sh
 ```
 
-`MODE` is `both` (default; two independent full grids, circular then ajs),
-`circular`, `ajs` (alias `taylor`), or `hybrid`.  `both` and `hybrid` pass two
-CSVs to every task; the row's model travels with it, so a batch may contain
-both.  `GRID_CSV_LIST=/path/circ.csv:/path/ajs.csv` skips derivation.
+`MODE` is `hybrid` (default; one derivation, circular below `p_break` and ajs
+at/above it), `circular`, or `ajs` (alias `taylor`).  `hybrid` passes the
+CSV(s) it emitted (normally both) to every task; the row's model travels with
+it, so a batch may contain both sides of the split (or only one, if one side
+is empty).  `GRID_CSV_LIST=/path/circ.csv:/path/ajs.csv` skips derivation.
 
 The submitter:
 

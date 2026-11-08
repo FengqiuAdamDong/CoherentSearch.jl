@@ -11,17 +11,17 @@
 # `CPUS_PER_TASK` threads internally.
 #
 # Grid models (`MODE`):
-#   both      (default) two independent full grids, circular and ajs/Taylor
+#   hybrid    (default) one derivation: circular below p_break, ajs at/above it
 #   circular  exact Keplerian (pb,x,at) grid only
 #   ajs       cubic accel/jerk/snap (Taylor) grid only
 #   taylor    alias of ajs
-#   hybrid    one derivation: circular below p_break, ajs at/above it
-# `MODE=both` and `MODE=hybrid` pass two CSVs to every task; the row's model
-# travels with it, so a batch may contain both.
+# `MODE=hybrid` passes the circular and/or ajs CSV(s) it emitted to every task;
+# the row's model travels with it, so a batch may contain both sides of the
+# split (or only one, if one side of the break is empty).
 #
 # Examples:
-#   INF=/path/OBS.inf MODE=both BATCH_SIZE=64 bash demod/slurm_demod_sweep.sh
-#   DRY_RUN=1 MODE=both BATCH_SIZE=64 bash demod/slurm_demod_sweep.sh
+#   INF=/path/OBS.inf MODE=hybrid BATCH_SIZE=64 bash demod/slurm_demod_sweep.sh
+#   DRY_RUN=1 MODE=hybrid BATCH_SIZE=64 bash demod/slurm_demod_sweep.sh
 #   GRID_CSV_LIST=/path/circ.csv:/path/ajs.csv BATCH_SIZE=32 \
 #       bash demod/slurm_demod_sweep.sh
 #   RESTART=1 RERUN_BATCHES="3 7" OUTDIR=/path/OUT bash demod/slurm_demod_sweep.sh
@@ -42,7 +42,7 @@ set -euo pipefail
 : "${DAT:=}"                     # default: ${INF%.inf}.dat
 : "${INBASE:=}"                  # default: basename of DAT without .dat
 
-: "${MODE:=both}"                # both | circular | ajs | taylor | hybrid
+: "${MODE:=hybrid}"              # hybrid | circular | ajs | taylor
 
 : "${BATCH_SIZE:=32}"            # grid rows per SLURM array element
 : "${MAX_ARRAY_TASKS:=1000}"     # fail if ceil(N/BATCH_SIZE) exceeds this
@@ -108,8 +108,8 @@ if [ -z "$COH_REPO" ]; then
 fi
 
 case "$MODE" in
-    both|circular|ajs|taylor|hybrid) ;;
-    *) die "MODE must be both|circular|ajs|taylor|hybrid (got '$MODE')" ;;
+    hybrid|circular|ajs|taylor) ;;
+    *) die "MODE must be hybrid|circular|ajs|taylor (got '$MODE')" ;;
 esac
 MODE_RESOLVED="$MODE"
 [ "$MODE" = taylor ] && MODE_RESOLVED=ajs
@@ -218,10 +218,6 @@ elif [ -n "$GRID_CSV_LIST" ]; then
     done
 else
     case "$MODE" in
-        both)
-            derive_one circular "${GRIDNAME}_circular"
-            derive_one ajs "${GRIDNAME}_ajs"
-            ;;
         hybrid)
             derive_one hybrid "$GRIDNAME"
             ;;
