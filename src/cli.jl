@@ -36,12 +36,24 @@ function search_argtable!(s::ArgParseSettings)
             arg_type = String
             default = ""
         "--demod-grid"
-            help = "Demodulate in memory instead of searching an .fft: treat the positional inputs as PRESTO .dat time series and read this grid CSV (from demod/nsns_grid.py; repeat the flag to pass several, as hybrid mode emits one per model).  Each row is demodulated, FFT'd and dereddened in RAM, then searched with every other option below, and only <stem>_demod_..._red.cohout is written -- no intermediate .dat/.inf/.fft.  Rejects -o, --plot and --plotstem (they name one output, and a sweep has many); plot afterwards from the .cohout files with bin/plot_candidates.jl."
+            help = "Demodulate in memory instead of searching an .fft: treat the positional inputs as PRESTO .dat time series and read this grid CSV (from demod/nsns_grid.py; repeat the flag to pass several, as hybrid mode emits one per model).  Each row is demodulated, FFT'd and dereddened in RAM, then searched with every other option below, and only <stem>_demod_..._red.cohout is written -- no intermediate .dat/.inf/.fft.  Use --demod-batch-size/--demod-batch-index to run one batch of rows per process (the SLURM path).  Rejects -o, --plot and --plotstem (they name one output, and a sweep has many); plot afterwards from the .cohout files with bin/plot_candidates.jl."
             action = :append_arg
             arg_type = String
             default = String[]
         "--demod-concurrency"
             help = "Grid points searched at once under --demod-grid.  0 (the default) uses one slot per Julia thread, each search pinned to nthreads/slots threads -- so 16 points on 16 threads run 16 single-threaded searches concurrently.  This is faster than letting one search use every thread, because a demodulation is serial and the search's own chunk parallelism flattens well below nthreads().  1 restores the purely sequential driver.  Each live slot also holds one demodulated amplitude array (N/2 ComplexF32, i.e. 4 bytes per input sample), so lower this to bound peak RSS on very long observations.  The observation is still read ONCE either way; this is not one process per point"
+            arg_type = Int
+            default = 0
+        "--demod-batch-size"
+            help = "With --demod-grid, split the flattened grid rows into batches of this many and process only --demod-batch-index.  0 (the default) processes every row in one process.  This is the SLURM batch unit: give every array task the same size and a different 1-based index.  A batch is a contiguous block of the flattened grid (CSVs in --demod-grid order), so the union of all batches covers every row exactly once.  The whole batch's point list is streamed in O(batch size), never the whole grid."
+            arg_type = Int
+            default = 0
+        "--demod-batch-index"
+            help = "1-based batch number to process; requires --demod-batch-size > 0.  Under SLURM set it to SLURM_ARRAY_TASK_ID + 1."
+            arg_type = Int
+            default = 1
+        "--demod-batch-total"
+            help = "Expected total number of flattened grid rows, if known (0 = unknown).  Used to clamp the last batch, report the batch count, and fail loudly if the grid no longer matches the submitted plan.  The SLURM submitter passes the count it planned with."
             arg_type = Int
             default = 0
         "--rednoise-startwidth"
@@ -332,6 +344,15 @@ loads the plotting backend *once* and plots them all.
 """
 function main(argv)
     a = parse_cmdline(argv)
+    # The batch flags describe how to slice a --demod-grid sweep.  Silently
+    # ignoring them on an .fft search would make a misconfigured SLURM job look
+    # like it had searched its batch when it had searched the whole file.
+    if isempty(a["demod-grid"]) &&
+       (a["demod-batch-size"] != 0 || a["demod-batch-index"] != 1 ||
+        a["demod-batch-total"] != 0)
+        throw(ArgumentError("--demod-batch-size/--demod-batch-index/" *
+                            "--demod-batch-total only apply with --demod-grid"))
+    end
     # `--demod-grid` is a different mode of operation, not a search option: the
     # positional inputs are PRESTO `.dat` time series, and the whole chain runs
     # in memory per grid point.  Dispatch before anything below assumes `.fft`.

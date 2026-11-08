@@ -42,6 +42,11 @@
 # drift budget over the observation); run `python nsns_grid.py -h` for the
 # full set of grid knobs.
 #
+# GRID_ONLY=1 derives/selects the grid, prints machine-readable
+# `GRID_CSV=<path>` and `GRID_POINTS=<n>` lines, and exits without demodulating
+# or searching.  demod/slurm_demod_sweep.sh uses this so the SLURM submitter and
+# this script share one definition of the grid.
+#
 #   bash demod/run_nsns_sweep.sh
 #   INF=/path/obs.inf NPHASE=20 NSAMP=1000 bash demod/run_nsns_sweep.sh
 #   GRID_CSV=/path/to/grid.csv bash demod/run_nsns_sweep.sh   # skip derivation
@@ -49,6 +54,7 @@
 #   MODE=hybrid bash demod/run_nsns_sweep.sh                  # circular + ajs
 #   MODE=hybrid P_BREAK=0.02 bash demod/run_nsns_sweep.sh     # manual p_break [yr]
 #   GPU=1 GPU_PROJECT=~/gpuenv bash demod/run_nsns_sweep.sh   # NVIDIA P40
+#   GRID_ONLY=1 MODE=circular bash demod/run_nsns_sweep.sh    # paths + count only
 #
 # Requires: julia (+ the CoherentSearch.jl project), a Python with numpy/scipy/
 # matplotlib/yaml (the pixi/anaconda env carrying FFA_stacking's deps), and
@@ -104,6 +110,8 @@ set -euo pipefail
 : "${P_BREAK:=}"                      # hybrid: manual switch period [yr]; empty = auto
 : "${BREAK_COV:=}"                    # hybrid: auto-switch ajs coverage [%]; empty = 60
 : "${PLOT:=}"                         # non-empty = write per-orbit phase plots
+: "${TERMS:=}"                        # ajs: subset of accel jerk snap; empty = all
+: "${CIRC_STRICT:=}"                  # circular/hybrid: non-empty = bound raw max|R|
 
 # Tool locations.
 : "${COH_REPO:=/home/fadong/Documents/CoherentSearch.jl}"
@@ -133,8 +141,8 @@ OUTDIR="$(cd "$OUTDIR" && pwd)"
 GRIDDIR="$OUTDIR/$GRIDNAME"
 mkdir -p "$GRIDDIR"
 
-DAT="${INF%.inf}.dat"
-[ -f "$DAT" ] || { echo "ERROR: no .dat beside $INF" >&2; exit 1; }
+: "${DAT:=${INF%.inf}.dat}"
+[ -f "$DAT" ] || { echo "ERROR: no .dat at $DAT (set DAT explicitly if it is not beside $INF)" >&2; exit 1; }
 : "${INBASE:=$(basename "${DAT%.dat}")}"
 
 echo ">> observation: $DAT"
@@ -159,6 +167,7 @@ else
         [ -n "$PO" ]   && GRID_ARGS+=(-p_o $PO)
         [ -n "$SINI" ] && GRID_ARGS+=(-sin_i $SINI)
         GRID_ARGS+=(-phase_tol_cycles "$PHASE_TOL")
+        [ -n "$CIRC_STRICT" ] && GRID_ARGS+=(-circ_strict)
     elif [ "$MODE" = "hybrid" ]; then
         # Hybrid: the ajs scan still needs e/omega_peri/n_phase/nsamp (it is
         # what measures coverage and grids the long-period side); the circular
@@ -174,6 +183,8 @@ else
         [ -n "$MAX_SNAP" ]   && GRID_ARGS+=(-max_snap "$MAX_SNAP")
         [ -n "$P_BREAK" ]    && GRID_ARGS+=(-p_break "$P_BREAK")
         [ -n "$BREAK_COV" ]  && GRID_ARGS+=(-break_coverage "$BREAK_COV")
+        [ -n "$TERMS" ]      && GRID_ARGS+=(-terms $TERMS)
+        [ -n "$CIRC_STRICT" ] && GRID_ARGS+=(-circ_strict)
         [ -n "$PLOT" ]       && GRID_ARGS+=(-plot)
     else
         GRID_ARGS+=(-phase_tol_cycles "$PHASE_TOL" -n_phase "$NPHASE" -nsamp "$NSAMP")
@@ -184,6 +195,7 @@ else
         [ -n "$MAX_ACCEL" ]  && GRID_ARGS+=(-max_accel "$MAX_ACCEL")
         [ -n "$MAX_JERK" ]   && GRID_ARGS+=(-max_jerk "$MAX_JERK")
         [ -n "$MAX_SNAP" ]   && GRID_ARGS+=(-max_snap "$MAX_SNAP")
+        [ -n "$TERMS" ]      && GRID_ARGS+=(-terms $TERMS)
         [ -n "$PLOT" ]       && GRID_ARGS+=(-plot)
     fi
 
@@ -204,12 +216,24 @@ else
 fi
 NPOINTS=0
 for csv in "${GRID_CSVS[@]}"; do
-    n=$(( $(grep -c . "$csv") - 1 ))
-    [ "$n" -ge 0 ] || n=0
+    # `awk`, not `grep -c .`: a whitespace-only line is a blank line to the
+    # Julia parser (which strips before testing), and the batched driver's
+    # --demod-batch-total check must agree with this count exactly.
+    n=$(awk 'NR > 1 && NF > 0 { n++ } END { print n + 0 }' "$csv")
     NPOINTS=$((NPOINTS + n))
 done
 echo ">> grid: $NPOINTS point(s) in ${GRID_CSVS[*]}"
 [ "$NPOINTS" -ge 1 ] || { echo "ERROR: empty grid" >&2; exit 1; }
+
+# Machine-readable grid-only mode, used by demod/slurm_demod_sweep.sh so the
+# submitter reuses this script's derivation rather than reimplementing it.
+if [ "${GRID_ONLY:-0}" = 1 ]; then
+    for csv in "${GRID_CSVS[@]}"; do
+        printf 'GRID_CSV=%s\n' "$csv"
+    done
+    printf 'GRID_POINTS=%s\n' "$NPOINTS"
+    exit 0
+fi
 
 # --------------------------------------------------------------------------
 # 2. Batch-demodulate every point (one Julia process), flat under $OUTDIR:

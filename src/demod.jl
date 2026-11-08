@@ -987,6 +987,40 @@ end
 # ---------------------------------------------------------------------------
 
 """
+    _demod_grid_mode(line, path) -> Symbol
+
+Parse a grid CSV header.  `accel,jerk,snap` selects the ajs (cubic Taylor)
+model, `pb,x,at` the circular model; anything else is an error naming `path`.
+Shared by `read_demod_grid` and `read_demod_grid_slice` so the streaming
+batched reader cannot disagree with the whole-file reader about a grid.
+"""
+function _demod_grid_mode(line, path)
+    cols = lowercase.(strip.(split(strip(line), ",")))
+    if cols == ["accel", "jerk", "snap"]
+        return :ajs
+    elseif cols == ["pb", "x", "at"]
+        return :circular
+    else
+        error("$path: unknown header $(join(cols, ",")); expected " *
+              "accel,jerk,snap or pb,x,at")
+    end
+end
+
+"""
+    _demod_grid_row(line, path) -> NTuple{3,String}
+
+Split one grid CSV data row into its three **raw literal** column strings.  The
+literal text (not a reparsed float) is what names the output file, so it must
+match the CSV byte for byte.
+"""
+function _demod_grid_row(line, path)
+    parts = split(line, ",")
+    length(parts) == 3 || error("$path: expected 3 columns, got $(length(parts))")
+    return (String(strip(parts[1])), String(strip(parts[2])),
+            String(strip(parts[3])))
+end
+
+"""
     read_demod_grid(csv_path) -> (mode, rows)
 
 Read one grid CSV from `demod/nsns_grid.py`.  The header selects the model --
@@ -1001,26 +1035,82 @@ function read_demod_grid(csv_path)
     header = true
     for line in eachline(csv_path)
         if header
-            cols = lowercase.(strip.(split(strip(line), ",")))
-            if cols == ["accel", "jerk", "snap"]
-                mode = :ajs
-            elseif cols == ["pb", "x", "at"]
-                mode = :circular
-            else
-                error("$csv_path: unknown header $(join(cols, ",")); expected " *
-                      "accel,jerk,snap or pb,x,at")
-            end
+            mode = _demod_grid_mode(line, csv_path)
             header = false
             continue
         end
         isempty(strip(line)) && continue
-        parts = split(line, ",")
-        length(parts) == 3 || error("$csv_path: expected 3 columns, got $(length(parts))")
-        push!(rows, (String(strip(parts[1])), String(strip(parts[2])),
-                     String(strip(parts[3]))))
+        push!(rows, _demod_grid_row(line, csv_path))
     end
     mode === nothing && error("$csv_path: empty file / no header")
     return mode, rows
+end
+
+"""
+    demod_batch_range(total, size, index) -> UnitRange{Int}
+
+Global 1-based grid-row range for one batch.  `size == 0` means no batching and
+requires `index == 1`; `total <= 0` means the total is not known yet, so the
+range runs to `lo + size - 1` and the caller truncates at end of file.
+
+This is the single definition of the batch partition used by both the CLI and
+the SLURM submitter's `batch_plan.tsv`, so the two cannot disagree about which
+rows a batch owns.
+"""
+function demod_batch_range(total::Integer, size::Integer, index::Integer)
+    size < 0 && throw(ArgumentError("--demod-batch-size must be >= 0 (got $size)"))
+    total < 0 && throw(ArgumentError("--demod-batch-total must be >= 0 (got $total)"))
+    index < 1 && throw(ArgumentError("--demod-batch-index must be >= 1 (got $index)"))
+    if size == 0
+        index == 1 || throw(ArgumentError(
+            "--demod-batch-index $index requires --demod-batch-size > 0"))
+        total == 0 && return 1:0
+        return 1:total
+    end
+    lo = (index - 1) * size + 1
+    if total > 0
+        lo > total && throw(ArgumentError(
+            "batch index $index of size $size starts at point $lo, past the total $total"))
+        return lo:min(lo + size - 1, total)
+    end
+    return lo:(lo + size - 1)
+end
+
+"""
+    read_demod_grid_slice(paths, first, last) -> Vector{Tuple{Symbol,NTuple{3,String}}}
+
+Read only the globally indexed rows `first:last` of the flattened grid formed by
+`paths` in order.  Rows are counted exactly as `read_demod_grid` counts them
+(blank/whitespace-only lines skipped), and the mode of each CSV travels with its
+rows, so a hybrid/both sweep can mix models in one batch.
+
+The CSVs are streamed, and the function stops as soon as `last` is passed: only
+the selected batch is ever materialized.  This is what lets a job on a
+178M-row grid run in O(batch) memory instead of holding every trial.
+"""
+function read_demod_grid_slice(paths, first::Integer, last::Integer)
+    first >= 1 || throw(ArgumentError("first grid row must be >= 1 (got $first)"))
+    last >= first || return Tuple{Symbol,NTuple{3,String}}[]
+    points = Tuple{Symbol,NTuple{3,String}}[]
+    g = 0
+    for path in paths
+        mode = nothing
+        header = true
+        for line in eachline(path)
+            if header
+                mode = _demod_grid_mode(line, path)
+                header = false
+                continue
+            end
+            isempty(strip(line)) && continue
+            g += 1
+            g < first && continue
+            g > last && return points
+            push!(points, (mode, _demod_grid_row(line, path)))
+        end
+        mode === nothing && error("$path: empty file / no header")
+    end
+    return points
 end
 
 """

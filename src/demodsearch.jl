@@ -30,6 +30,15 @@ use on a real `.fft` file ([`search_one`](@ref) is reused verbatim, so
 identically).  One `<stem>_demod_<grid>_red.cohout` is written per point, into
 `--outdir` or beside the input.
 
+**Batches.**  `--demod-batch-size B --demod-batch-index I` runs only the I-th
+contiguous block of B rows of the flattened grid (CSVs in `--demod-grid` order),
+the unit a SLURM array element executes.  The block is streamed by
+[`read_demod_grid_slice`](@ref), so the point list is O(B), not O(total grid).
+That is what makes a `10^8`-row ajs grid runnable at all: unbatched, the driver
+would hold every literal row string at once.  `--demod-batch-total` is the total
+the submitter planned with; it clamps the last batch and turns a changed grid
+into an error rather than a silently short run.
+
 **Sequential demodulation, concurrent searches.**  The search is the dominant
 cost (~1.7 s of a ~1.75 s in-process point at `--nharms 60`), and a demodulation
 is serial at ~25 ms — during which every worker would idle if one search held the
@@ -45,12 +54,13 @@ process per grid point.  Running a process per point was measured at only
 Julia's start-up, plan building and wisdom import per point (~0.85 s against a
 ~1.8 s point).  The observation is read once here, as intended.
 
-Peak memory is independent of the number of grid points, but it does scale with
-`--demod-concurrency`: every live slot holds one demodulated amplitude array
-(`N/2` `ComplexF32`, i.e. 4 bytes per input sample), and the remap holds the
-de-meaned and remapped series (8 bytes per sample).  On a long observation
-(`N` in the 10^8 range) lower the concurrency if RAM is tight; the default
-one-slot-per-thread can otherwise pin several GB of amplitudes alone.
+With batching, peak memory is independent of the total number of grid points
+(the point list is one batch), but it does scale with `--demod-concurrency`:
+every live slot holds one demodulated amplitude array (`N/2` `ComplexF32`, i.e.
+4 bytes per input sample), and the remap holds the de-meaned and remapped series
+(8 bytes per sample).  On a long observation (`N` in the 10^8 range) lower the
+concurrency if RAM is tight; the default one-slot-per-thread can otherwise pin
+several GB of amplitudes alone.
 
 Concurrent searches must not share a `SearchCache`: `Workspace`s are indexed by
 task index inside `_search_region!`, so two live searches would have their chunks
@@ -87,18 +97,50 @@ function demod_main(a)
     isempty(dats) && throw(ArgumentError(
         "--demod-grid needs the time series to demodulate: pass positional .dat paths or --filelist FILE"))
 
-    # Every grid CSV, flattened.  The mode travels with each row, since a hybrid
-    # sweep passes one CSV per model and they are not interchangeable.
+    # Grid rows, flattened in --demod-grid order.  A batch is a contiguous
+    # block of this global sequence: one SLURM array element runs one block, and
+    # the streaming reader materializes only that block.  A 10^8-row ajs grid is
+    # a real case, so flattening everything first is not an option.
+    grid_paths = a["demod-grid"]::Vector{String}
+    bsize = a["demod-batch-size"]::Int
+    bidx = a["demod-batch-index"]::Int
+    btotal = a["demod-batch-total"]::Int
+    bsize < 0 && throw(ArgumentError("--demod-batch-size must be >= 0 (got $bsize)"))
+    btotal < 0 && throw(ArgumentError("--demod-batch-total must be >= 0 (got $btotal)"))
+    bidx < 1 && throw(ArgumentError("--demod-batch-index must be >= 1 (got $bidx)"))
+    if bsize == 0
+        bidx == 1 || throw(ArgumentError(
+            "--demod-batch-index $bidx requires --demod-batch-size > 0"))
+        btotal == 0 || throw(ArgumentError(
+            "--demod-batch-total requires --demod-batch-size > 0"))
+    end
+
     points = Tuple{Symbol,Tuple{String,String,String}}[]
-    for csv in a["demod-grid"]::Vector{String}
-        mode, rows = read_demod_grid(csv)
-        @info "Demodulation grid" csv=csv mode=mode npoints=length(rows)
-        for row in rows
-            push!(points, (mode, row))
+    if bsize == 0
+        # The original whole-grid path: read every CSV and log each one's count.
+        for csv in grid_paths
+            mode, rows = read_demod_grid(csv)
+            @info "Demodulation grid" csv=csv mode=mode npoints=length(rows)
+            for row in rows
+                push!(points, (mode, row))
+            end
         end
+    else
+        rng = demod_batch_range(btotal, bsize, bidx)
+        points = read_demod_grid_slice(grid_paths, first(rng), last(rng))
+        isempty(points) && throw(ArgumentError(
+            "batch $bidx of size $bsize selects no grid points " *
+            "(rows $(first(rng)):$(last(rng)); total=$btotal)"))
+        if btotal > 0 && length(points) != length(rng)
+            throw(ArgumentError(
+                "batch $bidx expected $(length(rng)) grid rows " *
+                "($(first(rng)):$(last(rng))) but the grid CSVs yielded " *
+                "$(length(points)); the grid no longer matches the submitted batch plan"))
+        end
+        @info "Demodulation batch" index=bidx of=(btotal > 0 ? cld(btotal, bsize) : 0) first=first(rng) last=last(rng) points=length(points) total=btotal
     end
     isempty(points) && throw(ArgumentError(
-        "no demodulation points in $(join(a["demod-grid"], ", "))"))
+        "no demodulation points in $(join(grid_paths, ", "))"))
 
     outdir = a["outdir"]
     isempty(outdir) && (outdir = dirname(abspath(dats[1])))
@@ -123,7 +165,7 @@ function demod_main(a)
     # a silent data race, not a slow path. One cache per slot fixes that AND
     # amortises FFTW planning: the plans are built `nconc` times rather than once
     # per grid point, which matters because `cache = nothing` re-plans every point.
-    nconc = _demod_concurrency(a, backend)
+    nconc = min(_demod_concurrency(a, backend), max(1, length(points)))
     # Slot 1 is `cache` (the sequential one, reused when nconc == 1); the rest are
     # extra slots. `Channel` is how `_demod_submit!` blocks when all are busy.
     cache = SearchCache()

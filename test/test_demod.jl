@@ -327,6 +327,47 @@ end
     @test_throws ErrorException read_demod_grid(bad)
 end
 
+@testset "demod batch ranges and streaming slices" begin
+    # The single definition of the batch partition: every row exactly once, the
+    # last batch short, and an unknown total running to the requested end.
+    @test CoherentSearch.demod_batch_range(10, 4, 1) == 1:4
+    @test CoherentSearch.demod_batch_range(10, 4, 2) == 5:8
+    @test CoherentSearch.demod_batch_range(10, 4, 3) == 9:10
+    @test CoherentSearch.demod_batch_range(10, 20, 1) == 1:10
+    @test CoherentSearch.demod_batch_range(0, 0, 1) == 1:0
+    @test CoherentSearch.demod_batch_range(0, 4, 1) == 1:4
+    @test_throws ArgumentError CoherentSearch.demod_batch_range(10, 4, 0)
+    @test_throws ArgumentError CoherentSearch.demod_batch_range(10, 4, 4)
+    @test_throws ArgumentError CoherentSearch.demod_batch_range(10, -1, 1)
+    @test_throws ArgumentError CoherentSearch.demod_batch_range(10, 0, 2)
+
+    dir = mktempdir()
+    circ = joinpath(dir, "circ.csv")
+    # The blank line is deliberate: the slice reader must count rows exactly as
+    # `read_demod_grid` does, not as a raw line count would.
+    write(circ, "pb,x,at\n0.5,0.4,0.7\n\n0.6,0.5,0.8\n")
+    ajs = joinpath(dir, "ajs.csv")
+    write(ajs, "accel,jerk,snap\n1,2,3\n4,5,6\n")
+
+    cmode, crows = read_demod_grid(circ)
+    amode, arows = read_demod_grid(ajs)
+    allrows = [(cmode, r) for r in crows]
+    append!(allrows, [(amode, r) for r in arows])
+    @test length(allrows) == 4
+
+    # Global slices: first CSV, across the CSV boundary, and past the end.
+    @test CoherentSearch.read_demod_grid_slice([circ, ajs], 1, 2) == allrows[1:2]
+    @test CoherentSearch.read_demod_grid_slice([circ, ajs], 2, 3) == allrows[2:3]
+    @test CoherentSearch.read_demod_grid_slice([circ, ajs], 3, 4) == allrows[3:4]
+    @test isempty(CoherentSearch.read_demod_grid_slice([circ, ajs], 5, 8))
+    @test_throws ArgumentError CoherentSearch.read_demod_grid_slice([circ], 0, 1)
+
+    # Headers are still validated on the streaming path.
+    bad = joinpath(dir, "bad.csv")
+    write(bad, "alpha,beta\n1,2\n")
+    @test_throws ErrorException CoherentSearch.read_demod_grid_slice([bad], 1, 1)
+end
+
 @testset "in-memory chain recovers an injected pulsar" begin
     if !HAS_PULSEGEN
         @info "Skipping the inject/demod/search end-to-end test; pulsegen_gr.py or its Python not found" PULSEGEN
@@ -568,6 +609,86 @@ end
     @test all(f -> endswith(f, ".cohout"), readdir(outs[2]))
 end
 
+@testset "CLI --demod-grid batches cover the grid exactly once" begin
+    N = 1 << 14
+    dt = 0.0098304
+    epoch = 5.5e4
+    dir = mktempdir()
+    dat = joinpath(dir, "obs.dat")
+    write(dat, synth_series(N; f = 1.0, snr = 25.0, seed = 71))
+    write_presto_inf(joinpath(dir, "obs.inf"), N, dt, epoch; name = "obs")
+
+    circ = joinpath(dir, "circ.csv")
+    write(circ, "pb,x,at\n" *
+                "0.041666666666666664,0.41361909,0.0\n" *
+                "0.041666666666666664,0.41361909,1.0\n")
+    ajs = joinpath(dir, "ajs.csv")
+    write(ajs, "accel,jerk,snap\n-338.7,0.2512,9.41e-4\n1,2,3\n")
+
+    base = [dat, "--demod-grid", circ, "--demod-grid", ajs,
+            "--nharms", "8", "--threshold", "0.0", "--nowisdom",
+            "--noprogress", "--lofreq", "0.5", "--hifreq", "2.0",
+            "--blocksize", "64", "--demod-concurrency", "1"]
+    refdir = joinpath(dir, "ref")
+    with_logger(NullLogger()) do
+        CoherentSearch.main(vcat(base, ["--outdir", refdir]))
+    end
+    ref = sort(readdir(refdir))
+    @test length(ref) == 4
+    @test any(f -> occursin(r"_demod_pb.*_x.*_at", f), ref)
+    @test any(f -> occursin(r"_demod_a.*_j.*_s", f), ref)
+
+    # Batch 1 owns rows 1:3 (both circular rows + the first ajs row), batch 2
+    # owns row 4.  That deliberately crosses both the CSV boundary and the model
+    # change, which is the case the streaming reader has to get right.
+    out1 = joinpath(dir, "b1")
+    out2 = joinpath(dir, "b2")
+    with_logger(NullLogger()) do
+        CoherentSearch.main(vcat(base, ["--outdir", out1, "--demod-batch-size", "3",
+                                        "--demod-batch-index", "1",
+                                        "--demod-batch-total", "4"]))
+        CoherentSearch.main(vcat(base, ["--outdir", out2, "--demod-batch-size", "3",
+                                        "--demod-batch-index", "2",
+                                        "--demod-batch-total", "4"]))
+    end
+    b1 = sort(readdir(out1))
+    b2 = sort(readdir(out2))
+    @test length(b1) == 3
+    @test length(b2) == 1
+    @test isempty(intersect(b1, b2))
+    @test Set(vcat(b1, b2)) == Set(ref)
+    for f in ref
+        src = isfile(joinpath(out1, f)) ? joinpath(out1, f) : joinpath(out2, f)
+        @test read(src, String) == read(joinpath(refdir, f), String)
+    end
+
+    # A stale plan (total no longer matches) is an error, not a short run: batch
+    # 2 would expect rows 4:5 but the grid has only row 4.  An out-of-range batch
+    # index is an error too.
+    stale = try
+        with_logger(NullLogger()) do
+            CoherentSearch.main(vcat(base, ["--outdir", out1, "--demod-batch-size", "3",
+                                            "--demod-batch-index", "2",
+                                            "--demod-batch-total", "5"]))
+        end
+        ""
+    catch e
+        sprint(showerror, e)
+    end
+    @test occursin("no longer matches", stale)
+    beyond = try
+        with_logger(NullLogger()) do
+            CoherentSearch.main(vcat(base, ["--outdir", out1, "--demod-batch-size", "3",
+                                            "--demod-batch-index", "3",
+                                            "--demod-batch-total", "4"]))
+        end
+        ""
+    catch e
+        sprint(showerror, e)
+    end
+    @test occursin("past the total", beyond)
+end
+
 @testset "CLI argument guards" begin
     dir = mktempdir()
     dat = joinpath(dir, "obs.dat")
@@ -599,4 +720,14 @@ end
         @test !isempty(err)
         @test occursin("--demod-grid", err)
     end
+
+    # Batch flags are a slicing mode for --demod-grid; on an .fft they would be
+    # silently meaningless, so they are rejected before any file is opened.
+    err = try
+        CoherentSearch.main([joinpath(dir, "dummy.fft"), "--demod-batch-size", "2"])
+        ""
+    catch e
+        sprint(showerror, e)
+    end
+    @test occursin("--demod-grid", err)
 end
