@@ -537,10 +537,24 @@ def orbit_phase_param_plots(groups, args, model_lbl, plot_dir):
     print(f"Done: {len(groups)} phase/parameter plots in {plot_dir}/")
 
 
-# NS-NS default orbital-period ladder: 4 hours out to 24 hours, in years.
-_NSNS_PO_MIN_D = 4.0 / 24.0
-_NSNS_PO_MAX_D = 1.0
-_DEFAULT_PO = list(np.geomspace(_NSNS_PO_MIN_D, _NSNS_PO_MAX_D, 12) / 365.25)
+# NS-NS default orbital-period ladder, in years.
+_NSNS_PO_MIN_D = 11 / 24
+_NSNS_PO_MAX_D = 10
+_DEFAULT_PO = (np.geomspace(_NSNS_PO_MIN_D, _NSNS_PO_MAX_D, 12) / 365.25).tolist()
+
+
+class _POLadder(argparse.Action):
+    """-p_o P | MIN MAX [N] [days] -> list of periods in YEARS (geometric
+    ladder for a range); everything downstream works in years."""
+    def __call__(self, parser, ns, v, option_string=None):
+        if len(v) == 1:
+            setattr(ns, self.dest, [v[0] / 365.25])
+            return
+        if len(v) > 3 or (len(v) == 3 and v[2] != int(v[2]) or
+                          not 0 < v[0] < v[1]):
+            parser.error("-p_o takes P, or MIN MAX [N] with 0 < MIN < MAX")
+        n = int(v[2]) if len(v) == 3 else 12
+        setattr(ns, self.dest, (np.geomspace(v[0], v[1], n) / 365.25).tolist())
 
 
 def build_parser():
@@ -559,9 +573,12 @@ def build_parser():
     ap.add_argument("-pdot", type=float, default=1e-15,
                     help="Intrinsic period derivative [s/s], included in the truth")
     ap.add_argument("-p_o", type=float, nargs="+", default=_DEFAULT_PO,
-                    help="Orbital periods to scan [yr]; worst case over all of "
-                         "them is used. Default is 12 log-spaced points from "
-                         "4 h to 24 h (NS-NS range)")
+                    action=_POLadder, metavar="P",
+                    help="Orbital periods to scan [days]: MIN MAX [N] builds N "
+                         "(default 12) geometrically spaced periods; a single "
+                         "value scans just that period. Worst case over all of "
+                         "them is used. Default: 12 from "
+                         f"{_NSNS_PO_MIN_D * 24:g} h to {_NSNS_PO_MAX_D:g} d%(default).0s")
     ap.add_argument("-e", type=float, nargs="+",
                     default=[0.0, 0.1, 0.3, 0.5, 0.7, 0.9],
                     help="Eccentricities to scan; worst case over all of them "

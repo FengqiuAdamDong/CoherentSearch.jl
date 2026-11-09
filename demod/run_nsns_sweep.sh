@@ -96,7 +96,7 @@ set -euo pipefail
 : "${NPROC:=8}"
 
 # Grid derivation (forwarded to nsns_grid.py).  Empty = use its own default.
-: "${PO:=}"                           # orbital periods [yr], space separated
+: "${PO:=}"                           # orbital periods [days]: "P" or "MIN MAX [N]" (geometric)
 : "${ECC:=}"                          # eccentricities
 : "${SINI:=}"                         # sin(inclination)
 : "${OMEGA_PERI:=}"                   # arguments of periastron [rad]
