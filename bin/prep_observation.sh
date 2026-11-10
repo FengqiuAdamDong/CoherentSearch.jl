@@ -42,6 +42,7 @@ Usage: $(basename "$0") [OPTIONS] RAWFILE [RAWFILE ...]
       --no-bary             do not barycenter (prepsubband -nobary)
       --mask FILE           use this rfifind mask and skip rfifind
       --no-mask             skip rfifind and run prepsubband unmasked
+      --no-zerodm           do not pass prepsubband -zerodm (on by default)
       --rfifind-blocks N    rfifind -blocks (4)
       --rfifind-time S      rfifind -time S instead of -blocks
       --ncpus N             -ncpus for rfifind/prepsubband (1)
@@ -65,7 +66,7 @@ EOF
 # ---------------------------------------------------------------------------
 # Options
 # ---------------------------------------------------------------------------
-OUTDIR="" NAME="" DMS="" DMPREC=2 NOBARY=0 MASK="" NO_MASK=0
+OUTDIR="" NAME="" DMS="" DMPREC=2 NOBARY=0 ZERODM=1 MASK="" NO_MASK=0
 RFI_INT=(-blocks 4) NCPUS=1 RFI_ARGS=() PREP_ARGS=()
 DO_REDNOISE=0 ZAPFILE="" BARYV=0 FORCE=0 DRY_RUN=0 INPUTS=()
 
@@ -88,6 +89,7 @@ while [ "$#" -gt 0 ]; do
         --baryv)            BARYV=$v ;;
         --no-bary)          NOBARY=1;      shift; continue ;;
         --no-mask)          NO_MASK=1;     shift; continue ;;
+        --no-zerodm)        ZERODM=0;      shift; continue ;;
         --rednoise)         DO_REDNOISE=1; shift; continue ;;
         --force)            FORCE=1;       shift; continue ;;
         --dry-run)          DRY_RUN=1;     shift; continue ;;
@@ -219,6 +221,7 @@ PREPSUBBAND=$(tool prepsubband)
 PREP=("$PREPSUBBAND" -ncpus "$NCPUS" -dmstep 1 -numdms 1 -dmprec "$DMPREC")
 [ -z "$MASK" ]       || PREP+=(-mask "$MASK")
 [ "$NOBARY" = 0 ]    || PREP+=(-nobary)
+[ "$ZERODM" = 0 ]    || PREP+=(-zerodm)
 REALFFT=$(tool realfft)
 [ "$DO_REDNOISE" = 0 ] || REDNOISE=$(tool rednoise)
 [ -z "$ZAPFILE" ]      || { ZAPBIRDS=$(tool zapbirds); ZAPSHA=$(sha256sum "$ZAPFILE" | cut -d' ' -f1); }
