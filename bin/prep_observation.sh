@@ -158,6 +158,7 @@ done
 # ---------------------------------------------------------------------------
 # Tools and helpers
 # ---------------------------------------------------------------------------
+# Assign the result (X=$(tool x)) so a failure stops the script.
 tool() {  # $1 = tool name; $UPPERCASE_NAME overrides
     local var=${1^^}
     local t=${!var:-$(command -v "$1" || echo "/home/fadong/anaconda3/bin/$1")}
@@ -206,14 +207,16 @@ else
         note "rfifind: skip (exists) $rfi.mask"
     else
         note "rfifind: $NAME"
-        run rfifind "$(tool rfifind)" -ncpus "$NCPUS" "${RFI_INT[@]}" \
+        RFIFIND=$(tool rfifind)
+        run rfifind "$RFIFIND" -ncpus "$NCPUS" "${RFI_INT[@]}" \
             -o "$NAME" "${RFI_ARGS[@]}" -- "${INPUTS[@]}"
         wrote "$rfi".{mask,stats,inf}
     fi
     MASK="$OUTDIR/$rfi.mask"
 fi
 
-PREP=("$(tool prepsubband)" -ncpus "$NCPUS" -dmstep 1 -numdms 1 -dmprec "$DMPREC")
+PREPSUBBAND=$(tool prepsubband)
+PREP=("$PREPSUBBAND" -ncpus "$NCPUS" -dmstep 1 -numdms 1 -dmprec "$DMPREC")
 [ -z "$MASK" ]       || PREP+=(-mask "$MASK")
 [ "$NOBARY" = 0 ]    || PREP+=(-nobary)
 REALFFT=$(tool realfft)
